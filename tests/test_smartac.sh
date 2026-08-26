@@ -42,6 +42,30 @@ FAKE
   chmod +x "$TMP/bin/curl"
 }
 
+# Smart fake curl for tests that need to distinguish /health from /status.
+# Checks the request path and returns different bodies accordingly.
+fake_curl_paths() {
+  local status="$1" health_file="$2" status_file="$3"
+  cat >"$TMP/bin/curl" <<FAKE
+#!/usr/bin/env bash
+printf '%s ' "\$@" >> "$TMP/curl.args"
+cat > "$TMP/curl.stdin"
+
+# Check the URL in the arguments to determine which response to return.
+if printf '%s ' "\$@" | grep -q "/health"; then
+  cat "$health_file"
+elif printf '%s ' "\$@" | grep -q "/status"; then
+  cat "$status_file"
+else
+  # Fallback
+  cat "$health_file"
+fi
+
+printf '\n%s' "$status"
+FAKE
+  chmod +x "$TMP/bin/curl"
+}
+
 test_token_set_reads_stdin() {
   setup
   printf 'tok-abc' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
@@ -122,9 +146,8 @@ test_no_token_is_its_own_exit_code() {
 test_status_shape() {
   setup
   printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status.json" \
-     <(echo '{"state":"ONLINE"}') >"$TMP/both.json"
-  fake_curl 200 "$TMP/both.json"
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1)
   check "power"       "$(jq -r .power <<<"$out")"       "on"
   check "temperature" "$(jq -r .temperature <<<"$out")" "24.5"
@@ -134,12 +157,25 @@ test_status_shape() {
   teardown
 }
 
+test_status_online_comes_from_health() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  # health says ONLINE, status has no state field at top level.
+  # This proves that online:true comes from /health, not /status.
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  echo '{"components":{"main":{"switch":{"switch":{"value":"on"}}}}}' >"$TMP/status.json"
+  fake_curl_paths 200 "$TMP/health.json" "$TMP/status.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  check "online from ONLINE health" "$(jq -r .online <<<"$out")" "true"
+  teardown
+}
+
 test_status_reports_an_offline_device() {
   setup
   printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status.json" \
-     <(echo '{"state":"OFFLINE"}') >"$TMP/both.json"
-  fake_curl 200 "$TMP/both.json"
+  # health says OFFLINE, status is irrelevant
+  echo '{"state":"OFFLINE"}' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1)
   check "an OFFLINE device reports online:false" "$(jq -r .online <<<"$out")" "false"
   teardown
@@ -148,8 +184,9 @@ test_status_reports_an_offline_device() {
 test_status_missing_capability_is_null_not_absent() {
   setup
   printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  echo '{"state":"ONLINE","components":{"main":{"switch":{"switch":{"value":"off"}}}}}' >"$TMP/partial.json"
-  fake_curl 200 "$TMP/partial.json"
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  echo '{"components":{"main":{"switch":{"switch":{"value":"off"}}}}}' >"$TMP/status.json"
+  fake_curl_paths 200 "$TMP/health.json" "$TMP/status.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1)
   # null, not absent: the UI distinguishes "this device has no thermometer"
   # from "the field never arrived", and only one deserves a message.
@@ -166,6 +203,28 @@ test_status_requires_device() {
   teardown
 }
 
+test_status_preserves_401_exit_code_from_health() {
+  setup
+  printf 'tok-bad' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  # A 401 from the health call should exit with code 3, not 1
+  fake_curl 401 /dev/null
+  "$ROOT/bin/smartac" status --json --device ac-1 >/dev/null 2>&1; rc=$?
+  check "a 401 on health exits 3" "$rc" "3"
+  teardown
+}
+
+test_status_guards_malformed_health() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  # Invalid JSON in health response should die with proper error
+  echo 'not valid json' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1 2>&1); rc=$?
+  [[ $rc -ne 0 ]] && ok "malformed health causes non-zero exit" || bad "exit code" "got 0"
+  [[ $out == *"error"* ]] && ok "error is in JSON format" || bad "error format" "got [$out]"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -175,9 +234,12 @@ test_token_absent_from_argv
 test_401_clears_the_token
 test_no_token_is_its_own_exit_code
 test_status_shape
+test_status_online_comes_from_health
 test_status_reports_an_offline_device
 test_status_missing_capability_is_null_not_absent
 test_status_requires_device
+test_status_preserves_401_exit_code_from_health
+test_status_guards_malformed_health
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

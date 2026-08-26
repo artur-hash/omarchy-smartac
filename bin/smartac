@@ -102,8 +102,9 @@ cmd_status() {
   # about reachability, so an unplugged AC returns yesterday's numbers and
   # looks healthy. /health is the only thing that tells the two apart.
   local health online
-  health=$(api GET "/devices/$device/health") || exit 1
-  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health")
+  health=$(api GET "/devices/$device/health") || exit $?
+  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
+  [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
 
   api GET "/devices/$device/status" | jq --argjson online "$online" '
     .components.main as $m | {
