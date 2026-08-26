@@ -286,6 +286,16 @@ test_status_device_flag_missing_value() {
   teardown
 }
 
+test_parse_error_emits_exactly_one_json_object() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  err_output=$("$ROOT/bin/smartac" power on --device ac-1 --bogus 2>&1 >/dev/null)
+  # Count the number of lines in stderr (one JSON object per line expected)
+  line_count=$(printf '%s' "$err_output" | grep -c '^{.*}$')
+  check "parse error emits exactly one JSON object" "$line_count" "1"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -307,6 +317,7 @@ test_temp_rejects_non_numeric
 test_power_rejects_other_words
 test_power_device_flag_missing_value
 test_status_device_flag_missing_value
+test_parse_error_emits_exactly_one_json_object
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -126,29 +126,31 @@ send_command() {
   printf '{"ok":true}\n'
 }
 
-device_flag() {
+cmd_power() {
+  local state="${1:-}"; shift || true
+  [[ $state == on || $state == off ]] || die "usage: smartac power on|off --device <id>" 2
   local device=""
   while (( $# )); do
     case "$1" in
       --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
-      --json)   shift ;;
       *)        die "unknown argument: $1" 2 ;;
     esac
   done
-  printf '%s' "$device"
-}
-
-cmd_power() {
-  local state="${1:-}"; shift || true
-  [[ $state == on || $state == off ]] || die "usage: smartac power on|off --device <id>" 2
-  local device; device=$(device_flag "$@"); require_device "$device"
+  require_device "$device"
   send_command "$device" switch "$state"
 }
 
 cmd_temp() {
   local value="${1:-}"; shift || true
   [[ $value =~ ^-?[0-9]+([.][0-9]+)?$ ]] || die "temperature must be a number" 2
-  local device; device=$(device_flag "$@"); require_device "$device"
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      *)        die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
   # --argjson, not --arg: the API rejects a quoted number for this argument.
   send_command "$device" thermostatCoolingSetpoint setCoolingSetpoint "[$value]"
 }
