@@ -11,10 +11,19 @@ setup() {
   export SECRET_STORE="$TMP/secret"
   export PATH="$TMP/bin:$PATH"
   mkdir -p "$TMP/bin"
+  # Mirrors real libsecret: reads all of stdin, then strips exactly one
+  # trailing newline (not `cat > file`, which strips none and let an
+  # embedded-newline token through undetected — the reason C2 shipped with
+  # no test the first time).
   cat >"$TMP/bin/secret-tool" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
-  store)  cat > "$SECRET_STORE" ;;
+  store)
+    data=$(cat; printf x)
+    data="${data%x}"
+    [[ $data == *$'\n' ]] && data="${data%$'\n'}"
+    printf '%s' "$data" > "$SECRET_STORE"
+    ;;
   lookup) [[ -f $SECRET_STORE ]] || exit 1; cat "$SECRET_STORE" ;;
   clear)  rm -f "$SECRET_STORE" ;;
 esac
@@ -89,6 +98,58 @@ test_token_status_and_clear() {
   check "status reports a token" "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "true"
   "$ROOT/bin/smartac" token clear >/dev/null 2>&1
   check "status reports none after clear" "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "false"
+  teardown
+}
+
+test_token_set_rejects_embedded_newline() {
+  setup
+  # curl's -K config format treats a newline as a record separator: an
+  # unescaped one in the token splits it into two lines, and curl echoes the
+  # bogus continuation to stderr — which is how a token fragment used to
+  # reach the journal (C2). Reject it before it is ever stored.
+  out=$(printf 'tok-part1\npart2' | "$ROOT/bin/smartac" token set 2>&1); rc=$?
+  check "a token with an embedded newline is rejected" "$rc" "2"
+  [[ -f $SECRET_STORE ]] && bad "token was stored despite the embedded newline" "$(cat "$SECRET_STORE")" \
+    || ok "nothing was stored"
+  teardown
+}
+
+test_token_set_rejects_other_control_characters() {
+  setup
+  out=$(printf 'tok-\x01-bad' | "$ROOT/bin/smartac" token set 2>&1); rc=$?
+  check "a token with a control character is rejected" "$rc" "2"
+  [[ $out == *error* ]] && ok "the refusal is a real error" || bad "refusal message" "got [$out]"
+  teardown
+}
+
+test_token_set_rejects_whitespace_only() {
+  setup
+  out=$(printf '   ' | "$ROOT/bin/smartac" token set 2>&1); rc=$?
+  check "a whitespace-only token is rejected" "$rc" "2"
+  [[ $out == *error* ]] && ok "the refusal is a real error" || bad "refusal message" "got [$out]"
+  [[ -f $SECRET_STORE ]] && bad "whitespace-only token was stored" "$(cat "$SECRET_STORE")" \
+    || ok "nothing was stored"
+  teardown
+}
+
+test_token_set_trailing_newline_is_still_accepted() {
+  setup
+  # A plain token with one ordinary trailing newline (the common shape of a
+  # pasted or echoed value) must still work — only embedded control
+  # characters and blank input are rejected.
+  printf 'tok-good\n' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  check "a token with a trailing newline is accepted" "$?" "0"
+  check "the stored token has the newline stripped" "$(cat "$SECRET_STORE")" "tok-good"
+  teardown
+}
+
+test_doctor_device_flag_missing_value() {
+  setup
+  # The same shift-2-with-no-$2 bug fixed twice before at other --device
+  # sites (power, status); this is the third site. Under timeout so a
+  # regression fails the suite instead of hanging it.
+  timeout 3 "$ROOT/bin/smartac" doctor --device >/dev/null 2>&1
+  check "doctor with bare --device exits 2, not hang" "$?" "2"
   teardown
 }
 
@@ -334,6 +395,11 @@ test_doctor_capabilities_errors_on_unknown_device() {
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
+test_token_set_rejects_embedded_newline
+test_token_set_rejects_other_control_characters
+test_token_set_rejects_whitespace_only
+test_token_set_trailing_newline_is_still_accepted
+test_doctor_device_flag_missing_value
 test_devices_filters_by_capability
 test_devices_sends_bearer_token
 test_token_absent_from_argv

@@ -13,6 +13,7 @@ Item {
   id: root
 
   property QtObject bar: null
+  property string moduleName: ""
   property var settings: ({})
   readonly property string deviceId: String(settings.deviceId || "")
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "")

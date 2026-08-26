@@ -27,7 +27,19 @@ cmd_token() {
       [[ $# -eq 1 ]] || die "pass the token on stdin, not as an argument" 2
       [[ -t 0 ]] && die "pass the token on stdin, not as an argument" 2
       need secret-tool
-      secret-tool store --label="SmartThings AC token" \
+      local raw
+      raw=$(cat)
+      # Reject anything but a plain token. A control character — a bare
+      # newline above all — turns into a second record when this token is
+      # later written into curl's -K config format (see api(), below): the
+      # continuation line is parsed as a bogus option and echoed to curl's
+      # stderr, which is how a token fragment used to reach the journal.
+      # Whitespace-only input is rejected too: secret-tool would happily
+      # store it, and the panel would sit on the setup screen forever with
+      # nothing telling the user why.
+      [[ -n "${raw//[[:space:]]/}" ]] || die "token is empty" 2
+      [[ "$raw" =~ [[:cntrl:]] ]] && die "token contains control characters" 2
+      printf '%s' "$raw" | secret-tool store --label="SmartThings AC token" \
         service "$SECRET_SERVICE" key token || die "could not write to the keyring" 5
       printf '{"ok":true}\n' ;;
     clear)
@@ -58,7 +70,11 @@ api() {
   local args=(-sS -X "$method" -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
   [[ -n $body ]] && args+=(-H "Content-Type: application/json" -d "$body")
 
-  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | curl -K - "${args[@]}" "$API$path") || die "network unreachable" 6
+  # curl's own stderr is silenced: a malformed -K record (see cmd_token's
+  # control-character check) makes curl echo the offending config line back
+  # on stderr, and this process's stderr is not collected by the QML side —
+  # it would otherwise flow straight into the shell's journal.
+  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | curl -K - "${args[@]}" "$API$path" 2>/dev/null) || die "network unreachable" 6
   status="${raw##*$'\n'}"
   out="${raw%$'\n'*}"
 
@@ -162,7 +178,7 @@ cmd_doctor() {
   while (( $# )); do
     case "$1" in
       --capabilities) caps=1; shift ;;
-      --device) device="${2:-}"; shift 2 ;;
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
       *) shift ;;
     esac
   done

@@ -27,9 +27,16 @@ Panel {
   property bool hasToken: false
   property var devices: []
   property string busy: ""
+  property string actionError: ""
 
-  readonly property int minSetpoint: 16
-  readonly property int maxSetpoint: 30
+  // Bounds and the printed unit letter follow the device's own report
+  // (state.unit) rather than assuming Celsius. Fahrenheit bounds are the
+  // Celsius range (16–30, the WindFree's advertised span) converted and
+  // rounded to whole degrees: 16°C≈61°F, 30°C=86°F.
+  readonly property string setpointUnit: (panel.host && panel.host.state && panel.host.state.unit) ? panel.host.state.unit : "C"
+  readonly property bool isFahrenheit: setpointUnit === "F"
+  readonly property int minSetpoint: isFahrenheit ? 61 : 16
+  readonly property int maxSetpoint: isFahrenheit ? 86 : 30
   readonly property string bin: host ? host.pluginDir + "bin/smartac" : ""
 
   function refreshAll() {
@@ -39,6 +46,7 @@ Panel {
   }
 
   function run(args) {
+    panel.actionError = ""
     action.command = [panel.bin].concat(args)
     action.running = true
   }
@@ -49,8 +57,21 @@ Panel {
     panel.run(["temp", String(v), "--device", panel.host.deviceId])
   }
 
+  // The shell, not this panel, owns settings: Bar.qml re-assigns host.settings
+  // from shell.json on every layout apply (BarModel.applySettingsDelta), so a
+  // plain local assignment here is overwritten and the pick never survives a
+  // restart. shell.updateEntryInline is the only durable write path — same
+  // pattern as parm.clock's cycleFormat and tripleu.tor's persistRecentExit.
+  // Applied to host.settings locally too, so the picker's own screen updates
+  // on the click itself rather than waiting on the round trip back down.
   function chooseDevice(id) {
-    panel.host.settings = Object.assign({}, panel.host.settings, { deviceId: id })
+    if (!panel.host) return
+    var entry = { id: panel.host.moduleName }
+    for (var key in panel.host.settings) if (key !== "id") entry[key] = panel.host.settings[key]
+    entry.deviceId = id
+    panel.host.settings = entry
+    if (panel.host.bar && panel.host.bar.shell && typeof panel.host.bar.shell.updateEntryInline === "function")
+      panel.host.bar.shell.updateEntryInline(panel.host.moduleName, entry)
     panel.refreshAll()
   }
 
@@ -77,7 +98,16 @@ Panel {
 
   Process {
     id: action
-    onExited: { panel.busy = ""; panel.refreshAll() }
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      panel.busy = ""
+      if (exitCode !== 0) {
+        var msg = ""
+        try { msg = JSON.parse(String(actionErr.text || "")).error || "" } catch (e) {}
+        panel.actionError = msg !== "" ? msg : "Command failed."
+      }
+      panel.refreshAll()
+    }
   }
 
   // The token goes in on stdin. As an argument it would land in
@@ -97,8 +127,14 @@ Panel {
   }
 
   function saveToken(value) {
-    if (!value || value.length === 0) return
-    tokenSet.pending = value
+    // secret-tool strips only one trailing newline, and the backend now
+    // rejects anything else it does not recognize as a plain token — a
+    // clipboard paste routinely carries a trailing newline or pasted
+    // whitespace, so trim it here rather than bounce the user to the
+    // backend's refusal for something this harmless.
+    var trimmed = String(value || "").trim()
+    if (trimmed === "") return
+    tokenSet.pending = trimmed
     tokenSet.running = true
     tokenField.text = ""
   }
@@ -234,6 +270,20 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
+          // Not per-exit-code messaging — just the backend's own error text
+          // (bin/smartac's `error` field), so a rejected command is visibly
+          // different from a slow one instead of silently reverting.
+          Text {
+            visible: panel.actionError !== ""
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: panel.actionError
+            textFormat: Text.PlainText
+            color: Color.urgent
+            font.family: panel.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
           Row {
             width: parent.width
             spacing: Style.space(10)
@@ -245,7 +295,12 @@ Panel {
             }
             ToggleSwitch {
               anchors.verticalCenter: parent.verticalCenter
-              enabled: panel.busy === "" && panel.host.state.ok && panel.host.state.online
+              // Network unreachable also disables controls (spec's error
+              // table): BarWidget.qml deliberately keeps the last-good state
+              // on a failed poll, so state.ok/online alone would still read
+              // true. host.stale is what actually says the connection is
+              // down.
+              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.ok && panel.host.state.online
               checked: panel.host.state.power === "on"
               foreground: panel.foreground
               // `checked` here still reflects the state *before* this click —
@@ -273,19 +328,19 @@ Panel {
             PanelActionButton {
               iconText: "-"; tooltipText: "Cooler"
               foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
+              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
               onClicked: panel.setTemp(panel.host.state.setpoint - 1)
             }
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.setpoint === null ? "—" : (panel.host.state.setpoint + "°")
+              text: panel.host.state.setpoint === null ? "—" : (panel.host.state.setpoint + "°" + panel.setpointUnit)
               color: panel.foreground
               font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
             }
             PanelActionButton {
               iconText: "+"; tooltipText: "Warmer"
               foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
+              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
               onClicked: panel.setTemp(panel.host.state.setpoint + 1)
             }
           }
@@ -301,7 +356,7 @@ Panel {
             }
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.temperature === null ? "—" : (panel.host.state.temperature + "°")
+              text: panel.host.state.temperature === null ? "—" : (panel.host.state.temperature + "°" + panel.setpointUnit)
               color: panel.foreground
               font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
             }
