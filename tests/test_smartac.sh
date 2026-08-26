@@ -119,6 +119,53 @@ test_no_token_is_its_own_exit_code() {
   teardown
 }
 
+test_status_shape() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status.json" \
+     <(echo '{"state":"ONLINE"}') >"$TMP/both.json"
+  fake_curl 200 "$TMP/both.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  check "power"       "$(jq -r .power <<<"$out")"       "on"
+  check "temperature" "$(jq -r .temperature <<<"$out")" "24.5"
+  check "setpoint"    "$(jq -r .setpoint <<<"$out")"    "22"
+  check "unit"        "$(jq -r .unit <<<"$out")"        "C"
+  check "online"      "$(jq -r .online <<<"$out")"      "true"
+  teardown
+}
+
+test_status_reports_an_offline_device() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status.json" \
+     <(echo '{"state":"OFFLINE"}') >"$TMP/both.json"
+  fake_curl 200 "$TMP/both.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  check "an OFFLINE device reports online:false" "$(jq -r .online <<<"$out")" "false"
+  teardown
+}
+
+test_status_missing_capability_is_null_not_absent() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  echo '{"state":"ONLINE","components":{"main":{"switch":{"switch":{"value":"off"}}}}}' >"$TMP/partial.json"
+  fake_curl 200 "$TMP/partial.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  # null, not absent: the UI distinguishes "this device has no thermometer"
+  # from "the field never arrived", and only one deserves a message.
+  check "temperature is null" "$(jq -r '.temperature' <<<"$out")"    "null"
+  check "the key is present"  "$(jq 'has("temperature")' <<<"$out")" "true"
+  teardown
+}
+
+test_status_requires_device() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  "$ROOT/bin/smartac" status --json >/dev/null 2>&1
+  check "status without --device exits 2" "$?" "2"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -127,6 +174,10 @@ test_devices_sends_bearer_token
 test_token_absent_from_argv
 test_401_clears_the_token
 test_no_token_is_its_own_exit_code
+test_status_shape
+test_status_reports_an_offline_device
+test_status_missing_capability_is_null_not_absent
+test_status_requires_device
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

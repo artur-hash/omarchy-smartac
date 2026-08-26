@@ -83,8 +83,41 @@ cmd_devices() {
   }'
 }
 
+# ------------------------------------------------------------------ status --
+
+require_device() { [[ -n ${1:-} ]] || die "pass --device <id>" 2; }
+
+cmd_status() {
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) device="${2:-}"; shift 2 ;;
+      --json)   shift ;;
+      *)        die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+
+  # Two calls. /status answers with the last values it saw and says nothing
+  # about reachability, so an unplugged AC returns yesterday's numbers and
+  # looks healthy. /health is the only thing that tells the two apart.
+  local health online
+  health=$(api GET "/devices/$device/health") || exit 1
+  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health")
+
+  api GET "/devices/$device/status" | jq --argjson online "$online" '
+    .components.main as $m | {
+      power:       ($m.switch.switch.value // "off"),
+      temperature: ($m.temperatureMeasurement.temperature.value // null),
+      setpoint:    ($m.thermostatCoolingSetpoint.coolingSetpoint.value // null),
+      unit:        ($m.temperatureMeasurement.temperature.unit // "C"),
+      online:      $online
+    }'
+}
+
 case "${1:-}" in
   token)   shift; cmd_token "$@" ;;
   devices) cmd_devices ;;
+  status)  shift; cmd_status "$@" ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac

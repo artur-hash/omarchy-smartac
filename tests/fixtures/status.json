@@ -1,0 +1,9 @@
+{
+  "components": {
+    "main": {
+      "switch": { "switch": { "value": "on" } },
+      "temperatureMeasurement": { "temperature": { "value": 24.5, "unit": "C" } },
+      "thermostatCoolingSetpoint": { "coolingSetpoint": { "value": 22, "unit": "C" } }
+    }
+  }
+}
