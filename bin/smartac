@@ -169,9 +169,15 @@ cmd_doctor() {
 
   if (( caps )); then
     require_device "$device"
-    api GET /devices \
-      | jq -r --arg d "$device" '.items[] | select(.deviceId == $d)
-          | .components[]?.capabilities[]?.id' | sort
+    local devices_payload capabilities_list device_found
+    devices_payload=$(api GET /devices) || return 1
+    capabilities_list=$(jq -r --arg d "$device" '.items[] | select(.deviceId == $d)
+          | .components[]?.capabilities[]?.id' <<<"$devices_payload" | sort)
+    device_found=$(jq -r --arg d "$device" '[.items[] | select(.deviceId == $d)] | length' <<<"$devices_payload")
+    if [[ $device_found -eq 0 ]]; then
+      die "device not found: $device" 2
+    fi
+    printf '%s\n' "$capabilities_list"
     return 0
   fi
 

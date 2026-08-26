@@ -319,6 +319,18 @@ test_doctor_capabilities_lists_raw_ids() {
   teardown
 }
 
+test_doctor_capabilities_errors_on_unknown_device() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  out=$("$ROOT/bin/smartac" doctor --capabilities --device unknown-device 2>&1); rc=$?
+  [[ $rc -ne 0 ]] && ok "unknown device exits non-zero" || bad "exit code" "got 0"
+  grep -q "device not found" <<<"$out" \
+    && ok "error message names the missing device" || bad "error message" "$out"
+  [[ $out == *"error"* ]] && ok "error is in JSON format" || bad "error format" "$out"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -343,6 +355,7 @@ test_status_device_flag_missing_value
 test_parse_error_emits_exactly_one_json_object
 test_doctor_redacts_the_token
 test_doctor_capabilities_lists_raw_ids
+test_doctor_capabilities_errors_on_unknown_device
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
