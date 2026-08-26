@@ -28,13 +28,14 @@ ok()    { PASS=$((PASS+1)); printf '  ok    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1)); printf '  FAIL  %s\n        %s\n' "$1" "$2"; }
 check() { [[ $2 == "$3" ]] && ok "$1" || bad "$1" "expected [$3], got [$2]"; }
 
-# Fake curl: records its arguments, prints the fixture, then the status code on
-# its own line — the shape the real curl produces with -w '\n%{http_code}'.
+# Fake curl: records its arguments, records stdin, prints the fixture, then the
+# status code on its own line — the shape the real curl produces with -w '\n%{http_code}'.
 fake_curl() {
   local status="$1" body_file="$2"
   cat >"$TMP/bin/curl" <<FAKE
 #!/usr/bin/env bash
 printf '%s ' "\$@" >> "$TMP/curl.args"
+cat > "$TMP/curl.stdin"
 cat "$body_file"
 printf '\n%s' "$status"
 FAKE
@@ -83,9 +84,20 @@ test_devices_sends_bearer_token() {
   printf 'tok-xyz' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   "$ROOT/bin/smartac" devices --json >/dev/null
-  grep -q "Bearer tok-xyz" "$TMP/curl.args" \
-    && ok "the request carries the bearer token" \
-    || bad "bearer token" "not in the recorded curl arguments"
+  grep -q "Bearer tok-xyz" "$TMP/curl.stdin" \
+    && ok "the request carries the bearer token via stdin" \
+    || bad "bearer token" "not in the recorded curl stdin"
+  teardown
+}
+
+test_token_absent_from_argv() {
+  setup
+  printf 'tok-secret' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  "$ROOT/bin/smartac" devices --json >/dev/null
+  grep -q "tok-secret" "$TMP/curl.args" \
+    && bad "token exposed" "found in curl arguments, but should be in stdin only" \
+    || ok "token is absent from curl arguments"
   teardown
 }
 
@@ -112,6 +124,7 @@ test_token_never_in_argv
 test_token_status_and_clear
 test_devices_filters_by_capability
 test_devices_sends_bearer_token
+test_token_absent_from_argv
 test_401_clears_the_token
 test_no_token_is_its_own_exit_code
 

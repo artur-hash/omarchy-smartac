@@ -46,14 +46,19 @@ cmd_token() {
 
 api() {
   need curl
-  local method="$1" path="$2" body="${3:-}" token raw status out
+  local method="$1" path="$2" body="${3:-}" token raw status out token_escaped
   token=$(read_token) || die "no token stored" 2
 
-  local args=(-sS -X "$method" -H "Authorization: Bearer $token"
-              -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
+  # Escape backslashes and double quotes in token for curl's config format.
+  # SmartThings tokens are opaque strings unlikely to contain these characters,
+  # but escaping them ensures the header is formed correctly if they do.
+  token_escaped="${token//\\/\\\\}"
+  token_escaped="${token_escaped//\"/\\\"}"
+
+  local args=(-sS -X "$method" -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
   [[ -n $body ]] && args+=(-H "Content-Type: application/json" -d "$body")
 
-  raw=$(curl "${args[@]}" "$API$path") || die "network unreachable" 6
+  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | curl -K - "${args[@]}" "$API$path") || die "network unreachable" 6
   status="${raw##*$'\n'}"
   out="${raw%$'\n'*}"
 
