@@ -91,7 +91,7 @@ cmd_status() {
   local device=""
   while (( $# )); do
     case "$1" in
-      --device) device="${2:-}"; shift 2 ;;
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
       --json)   shift ;;
       *)        die "unknown argument: $1" 2 ;;
     esac
@@ -130,8 +130,9 @@ device_flag() {
   local device=""
   while (( $# )); do
     case "$1" in
-      --device) device="${2:-}"; shift 2 ;;
-      *) shift ;;
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      --json)   shift ;;
+      *)        die "unknown argument: $1" 2 ;;
     esac
   done
   printf '%s' "$device"

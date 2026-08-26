@@ -270,6 +270,22 @@ test_power_rejects_other_words() {
   teardown
 }
 
+test_power_device_flag_missing_value() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  timeout 2 "$ROOT/bin/smartac" power on --device >/dev/null 2>&1
+  check "power with bare --device exits 2, not hang" "$?" "2"
+  teardown
+}
+
+test_status_device_flag_missing_value() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  timeout 2 "$ROOT/bin/smartac" status --json --device >/dev/null 2>&1
+  check "status with bare --device exits 2, not hang" "$?" "2"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -289,6 +305,8 @@ test_power_sends_the_switch_command
 test_temp_sends_a_numeric_setpoint
 test_temp_rejects_non_numeric
 test_power_rejects_other_words
+test_power_device_flag_missing_value
+test_status_device_flag_missing_value
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
