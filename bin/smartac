@@ -155,11 +155,53 @@ cmd_temp() {
   send_command "$device" thermostatCoolingSetpoint setCoolingSetpoint "[$value]"
 }
 
+# ------------------------------------------------------------------ doctor --
+
+cmd_doctor() {
+  local caps=0 device=""
+  while (( $# )); do
+    case "$1" in
+      --capabilities) caps=1; shift ;;
+      --device) device="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if (( caps )); then
+    require_device "$device"
+    api GET /devices \
+      | jq -r --arg d "$device" '.items[] | select(.deviceId == $d)
+          | .components[]?.capabilities[]?.id' | sort
+    return 0
+  fi
+
+  printf 'SmartThings AC doctor\n\n'
+  for c in curl jq secret-tool; do
+    command -v "$c" >/dev/null 2>&1 \
+      && printf '  ok    %s\n' "$c" || printf '  FAIL  %s is missing\n' "$c"
+  done
+
+  local t
+  if t=$(read_token 2>/dev/null); then
+    # Four characters tells two tokens apart and is not enough to use one.
+    printf '  ok    token stored (%s...)\n' "${t:0:4}"
+  else
+    printf '  FAIL  no token stored\n'; return 1
+  fi
+
+  local devices_json
+  devices_json=$(cmd_devices) || return 1
+  local n
+  n=$(jq -r '.devices | length' <<<"$devices_json") || die "failed to parse devices" 8
+  printf '  ok    reachable, %s air conditioner(s) visible\n' "$n"
+}
+
 case "${1:-}" in
   token)   shift; cmd_token "$@" ;;
   devices) cmd_devices ;;
   status)  shift; cmd_status "$@" ;;
   power)   shift; cmd_power "$@" ;;
   temp)    shift; cmd_temp "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac

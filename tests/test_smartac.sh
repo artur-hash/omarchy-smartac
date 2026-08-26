@@ -296,6 +296,29 @@ test_parse_error_emits_exactly_one_json_object() {
   teardown
 }
 
+test_doctor_redacts_the_token() {
+  setup
+  printf 'tok-verysecretvalue' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  out=$("$ROOT/bin/smartac" doctor 2>&1)
+  # Asserts the secret's absence, not the prefix's presence: a redaction that
+  # holds on the happy path and leaks on an error path passes the weaker one.
+  grep -q "verysecretvalue" <<<"$out" \
+    && bad "doctor leaks the token" "$out" || ok "doctor does not print the token"
+  grep -q "tok-" <<<"$out" && ok "doctor shows a redacted prefix" || bad "prefix" "$out"
+  teardown
+}
+
+test_doctor_capabilities_lists_raw_ids() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  out=$("$ROOT/bin/smartac" doctor --capabilities --device ac-1)
+  grep -q "thermostatCoolingSetpoint" <<<"$out" \
+    && ok "capabilities are listed" || bad "capabilities" "$out"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -318,6 +341,8 @@ test_power_rejects_other_words
 test_power_device_flag_missing_value
 test_status_device_flag_missing_value
 test_parse_error_emits_exactly_one_json_object
+test_doctor_redacts_the_token
+test_doctor_capabilities_lists_raw_ids
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
