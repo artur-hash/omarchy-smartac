@@ -64,6 +64,41 @@ test("nextInterval backs off exponentially and caps at ten minutes", () => {
   assert.strictEqual(M.nextInterval({ok: false}, 90000, 9), 600000);
 });
 
+test("parseStatus rejects arrays", () => {
+  assert.strictEqual(M.parseStatus('[1,2,3]').ok, false);
+});
+
+test("parseStatus treats absent online as offline", () => {
+  assert.strictEqual(M.parseStatus('{"power":"on","temperature":24}').online, false);
+});
+
+test("parseStatus treats null online as offline", () => {
+  assert.strictEqual(M.parseStatus('{"power":"on","temperature":24,"online":null}').online, false);
+});
+
+test("parseStatus respects explicit online:true", () => {
+  assert.strictEqual(M.parseStatus('{"power":"on","temperature":24,"online":true}').online, true);
+});
+
+test("parseStatus fuzz: never throws on malformed input", () => {
+  var fuzzInputs = [
+    null,
+    undefined,
+    123,
+    '[1,2,3]',
+    '   ',
+    '{"power":123}',
+    '{"temperature":"24"}',
+    'not json',
+    '{incomplete',
+  ];
+  for (var i = 0; i < fuzzInputs.length; i++) {
+    var result = M.parseStatus(fuzzInputs[i]);
+    assert(typeof result === "object", "fuzz input should return object");
+    assert(typeof result.ok === "boolean", "result.ok should be boolean");
+  }
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`ok    ${name}`); }

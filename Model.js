@@ -16,14 +16,14 @@ function parseStatus(text) {
   if (raw === "") return emptyState()
   try {
     var d = JSON.parse(raw)
-    if (!d || typeof d !== "object" || d.error) return emptyState()
+    if (!d || typeof d !== "object" || Array.isArray(d) || d.error) return emptyState()
     return {
       ok: true,
       power: d.power === "on" ? "on" : "off",
       temperature: (typeof d.temperature === "number") ? d.temperature : null,
       setpoint: (typeof d.setpoint === "number") ? d.setpoint : null,
       unit: d.unit || "C",
-      online: d.online !== false
+      online: d.online === true
     }
   } catch (e) {
     return emptyState()
