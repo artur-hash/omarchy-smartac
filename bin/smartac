@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# SmartThings AC backend. Owns every HTTP call and the keyring token; prints
+# JSON on stdout and nothing else, so the QML never parses prose.
+set -uo pipefail
+
+API="https://api.smartthings.com/v1"
+SECRET_SERVICE="smartac"
+
+die()  { printf '{"error":%s}\n' "$(jq -Rn --arg m "$1" '$m')" >&2; exit "${2:-1}"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1" 4; }
+need jq
+
+# ------------------------------------------------------------------- token --
+
+read_token() {
+  local t
+  t=$(secret-tool lookup service "$SECRET_SERVICE" key token 2>/dev/null) || return 1
+  [[ -n $t ]] || return 1
+  printf '%s' "$t"
+}
+
+cmd_token() {
+  case "${1:-}" in
+    set)
+      # stdin only. An argument would land in /proc/<pid>/cmdline, which every
+      # process running as this user can read while the call is in flight.
+      [[ $# -eq 1 ]] || die "pass the token on stdin, not as an argument" 2
+      [[ -t 0 ]] && die "pass the token on stdin, not as an argument" 2
+      need secret-tool
+      secret-tool store --label="SmartThings AC token" \
+        service "$SECRET_SERVICE" key token || die "could not write to the keyring" 5
+      printf '{"ok":true}\n' ;;
+    clear)
+      need secret-tool
+      secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
+      printf '{"ok":true}\n' ;;
+    status)
+      need secret-tool
+      if read_token >/dev/null 2>&1; then printf '{"hasToken":true}\n'
+      else printf '{"hasToken":false}\n'; fi ;;
+    *) die "usage: smartac token set|clear|status" 2 ;;
+  esac
+}
+
+case "${1:-}" in
+  token) shift; cmd_token "$@" ;;
+  *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
+esac
