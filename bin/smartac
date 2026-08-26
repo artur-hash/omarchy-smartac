@@ -42,7 +42,44 @@ cmd_token() {
   esac
 }
 
+# --------------------------------------------------------------------- api --
+
+api() {
+  need curl
+  local method="$1" path="$2" body="${3:-}" token raw status out
+  token=$(read_token) || die "no token stored" 2
+
+  local args=(-sS -X "$method" -H "Authorization: Bearer $token"
+              -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
+  [[ -n $body ]] && args+=(-H "Content-Type: application/json" -d "$body")
+
+  raw=$(curl "${args[@]}" "$API$path") || die "network unreachable" 6
+  status="${raw##*$'\n'}"
+  out="${raw%$'\n'*}"
+
+  case "$status" in
+    2*)  printf '%s' "$out" ;;
+    401) secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
+         die "the token was rejected; enter a new one" 3 ;;
+    429) die "rate limited by SmartThings" 7 ;;
+    *)   die "SmartThings returned HTTP $status" 8 ;;
+  esac
+}
+
+# ----------------------------------------------------------------- devices --
+
+cmd_devices() {
+  # airConditionerMode, not switch: switch alone matches every lamp in the
+  # account, and a picker full of lamps is worse than no picker.
+  api GET /devices | jq '{
+    devices: [ .items[]
+      | select(any(.components[]?.capabilities[]?; .id == "airConditionerMode"))
+      | { id: .deviceId, label: (.label // .name // .deviceId) } ]
+  }'
+}
+
 case "${1:-}" in
-  token) shift; cmd_token "$@" ;;
+  token)   shift; cmd_token "$@" ;;
+  devices) cmd_devices ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac

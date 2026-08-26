@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "deviceId": "ac-1",
+      "label": "Sala",
+      "components": [
+        { "id": "main", "capabilities": [
+          { "id": "switch" }, { "id": "airConditionerMode" },
+          { "id": "thermostatCoolingSetpoint" }, { "id": "temperatureMeasurement" }
+        ] }
+      ]
+    },
+    {
+      "deviceId": "lamp-1",
+      "label": "Abajur",
+      "components": [ { "id": "main", "capabilities": [ { "id": "switch" } ] } ]
+    }
+  ]
+}

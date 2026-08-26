@@ -28,6 +28,19 @@ ok()    { PASS=$((PASS+1)); printf '  ok    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1)); printf '  FAIL  %s\n        %s\n' "$1" "$2"; }
 check() { [[ $2 == "$3" ]] && ok "$1" || bad "$1" "expected [$3], got [$2]"; }
 
+# Fake curl: records its arguments, prints the fixture, then the status code on
+# its own line — the shape the real curl produces with -w '\n%{http_code}'.
+fake_curl() {
+  local status="$1" body_file="$2"
+  cat >"$TMP/bin/curl" <<FAKE
+#!/usr/bin/env bash
+printf '%s ' "\$@" >> "$TMP/curl.args"
+cat "$body_file"
+printf '\n%s' "$status"
+FAKE
+  chmod +x "$TMP/bin/curl"
+}
+
 test_token_set_reads_stdin() {
   setup
   printf 'tok-abc' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
@@ -54,9 +67,53 @@ test_token_status_and_clear() {
   teardown
 }
 
+test_devices_filters_by_capability() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  out=$("$ROOT/bin/smartac" devices --json)
+  check "only the AC is listed"   "$(jq -r '.devices | length' <<<"$out")" "1"
+  check "the AC's id survives"    "$(jq -r '.devices[0].id' <<<"$out")"    "ac-1"
+  check "the AC's label survives" "$(jq -r '.devices[0].label' <<<"$out")" "Sala"
+  teardown
+}
+
+test_devices_sends_bearer_token() {
+  setup
+  printf 'tok-xyz' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  "$ROOT/bin/smartac" devices --json >/dev/null
+  grep -q "Bearer tok-xyz" "$TMP/curl.args" \
+    && ok "the request carries the bearer token" \
+    || bad "bearer token" "not in the recorded curl arguments"
+  teardown
+}
+
+test_401_clears_the_token() {
+  setup
+  printf 'tok-bad' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 401 /dev/null
+  "$ROOT/bin/smartac" devices --json >/dev/null 2>&1; rc=$?
+  check "a 401 exits 3" "$rc" "3"
+  check "a 401 clears the stored token" \
+        "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "false"
+  teardown
+}
+
+test_no_token_is_its_own_exit_code() {
+  setup
+  "$ROOT/bin/smartac" devices --json >/dev/null 2>&1; rc=$?
+  check "no token exits 2" "$rc" "2"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
+test_devices_filters_by_capability
+test_devices_sends_bearer_token
+test_401_clears_the_token
+test_no_token_is_its_own_exit_code
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
