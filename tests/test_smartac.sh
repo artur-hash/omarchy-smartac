@@ -225,6 +225,51 @@ test_status_guards_malformed_health() {
   teardown
 }
 
+test_power_sends_the_switch_command() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  echo '{"results":[{"status":"ACCEPTED"}]}' >"$TMP/ok.json"
+  fake_curl 200 "$TMP/ok.json"
+  "$ROOT/bin/smartac" power on --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"switch"' <<<"$args" && ok "capability is switch"   || bad "capability" "$args"
+  grep -q '"command":"on"'        <<<"$args" && ok "command is on"          || bad "command" "$args"
+  grep -q 'devices/ac-1/commands' <<<"$args" && ok "hits the commands path" || bad "path" "$args"
+  teardown
+}
+
+test_temp_sends_a_numeric_setpoint() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  echo '{"results":[{"status":"ACCEPTED"}]}' >"$TMP/ok.json"
+  fake_curl 200 "$TMP/ok.json"
+  "$ROOT/bin/smartac" temp 22 --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"command":"setCoolingSetpoint"' <<<"$args" \
+    && ok "command is setCoolingSetpoint" || bad "command" "$args"
+  # 22, not "22" — the API rejects the quoted form. Asserted on the bytes that
+  # went out, not on the shape of the jq call that produced them.
+  grep -q '"arguments":\[22\]' <<<"$args" \
+    && ok "the argument is a JSON number" || bad "arguments" "$args"
+  teardown
+}
+
+test_temp_rejects_non_numeric() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  "$ROOT/bin/smartac" temp cold --device ac-1 >/dev/null 2>&1
+  check "a non-numeric temperature exits 2" "$?" "2"
+  teardown
+}
+
+test_power_rejects_other_words() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  "$ROOT/bin/smartac" power maybe --device ac-1 >/dev/null 2>&1
+  check "power only accepts on/off" "$?" "2"
+  teardown
+}
+
 test_token_set_reads_stdin
 test_token_never_in_argv
 test_token_status_and_clear
@@ -240,6 +285,10 @@ test_status_missing_capability_is_null_not_absent
 test_status_requires_device
 test_status_preserves_401_exit_code_from_health
 test_status_guards_malformed_health
+test_power_sends_the_switch_command
+test_temp_sends_a_numeric_setpoint
+test_temp_rejects_non_numeric
+test_power_rejects_other_words
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

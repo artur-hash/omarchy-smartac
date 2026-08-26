@@ -116,9 +116,47 @@ cmd_status() {
     }'
 }
 
+# ---------------------------------------------------------------- commands --
+
+send_command() {
+  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body
+  body=$(jq -cn --arg c "$capability" --arg k "$command" --argjson a "$args_json" \
+    '{commands:[{component:"main", capability:$c, command:$k, arguments:$a}]}')
+  api POST "/devices/$device/commands" "$body" >/dev/null
+  printf '{"ok":true}\n'
+}
+
+device_flag() {
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) device="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s' "$device"
+}
+
+cmd_power() {
+  local state="${1:-}"; shift || true
+  [[ $state == on || $state == off ]] || die "usage: smartac power on|off --device <id>" 2
+  local device; device=$(device_flag "$@"); require_device "$device"
+  send_command "$device" switch "$state"
+}
+
+cmd_temp() {
+  local value="${1:-}"; shift || true
+  [[ $value =~ ^-?[0-9]+([.][0-9]+)?$ ]] || die "temperature must be a number" 2
+  local device; device=$(device_flag "$@"); require_device "$device"
+  # --argjson, not --arg: the API rejects a quoted number for this argument.
+  send_command "$device" thermostatCoolingSetpoint setCoolingSetpoint "[$value]"
+}
+
 case "${1:-}" in
   token)   shift; cmd_token "$@" ;;
   devices) cmd_devices ;;
   status)  shift; cmd_status "$@" ;;
+  power)   shift; cmd_power "$@" ;;
+  temp)    shift; cmd_temp "$@" ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac
