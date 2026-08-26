@@ -75,13 +75,22 @@ Item {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // A snowflake glyph stands in for the temperature whenever Model.barLabel
-    // has nothing to say (off, offline, or never configured). WidgetButton
-    // hides itself when text is empty, but the spec is explicit that this
-    // widget does the opposite: "the icon still renders" (Model.js) and
-    // "Icon unlit" rather than absent (design spec, offline row) — so there
-    // is always something to paint, and only opacity carries the state.
-    text: root.label !== "" ? root.label : "❄"
+    // A fan glyph stands in for the temperature whenever Model.barLabel has
+    // nothing to say (off, offline, or never configured). WidgetButton hides
+    // itself when text is empty, but the spec is explicit that this widget
+    // does the opposite: "the icon still renders" (Model.js) and "Icon
+    // unlit" rather than absent (design spec, offline row) — so there is
+    // always something to paint, and only opacity carries the state. The
+    // literal snowflake "❄" renders as an illegible dot at bar size. The
+    // obvious replacement, Nerd Font md-air_conditioner, turned out to be
+    // its own version of the same bug: rendered at bar size it is a tiny fan
+    // glyph with the literal text "A/C" baked into the artwork underneath
+    // it, illegible for the same reason — verified by rendering the glyph
+    // directly through the font, not just by eyeballing it small in an
+    // editor. md-fan is the bare pinwheel alone, at the same visual weight
+    // as the other plugins on this bar (e.g. 󰉼, 󰅁, 󰏫), and reads clearly at
+    // bar size.
+    text: root.label !== "" ? root.label : "󰈐"
     labelVisible: true
     // Dimmed when off, unreachable, or never configured. To someone glancing
     // at the bar those mean one thing: it is not cooling.
