@@ -61,6 +61,19 @@ test("nextInterval doubles while the device is off", () => {
   assert.strictEqual(M.nextInterval({ok: true, power: "on"}, 90000, 0), 90000);
 });
 
+test("an attended poll keeps its cadence while the unit is off", () => {
+  // The doubling spares requests on a bar label nobody is reading. With the
+  // panel open the user is clicking, and this hardware moves its own settings
+  // -- a mode change drops the preset -- so halving the cadence there is
+  // backwards.
+  assert.strictEqual(M.nextInterval({ok: true, power: "off"}, 20000, 0, true), 20000);
+  assert.strictEqual(M.nextInterval({ok: true, power: "off"}, 90000, 0, false), 180000);
+});
+
+test("attention never overrides the rate-limit backoff", () => {
+  assert.strictEqual(M.nextInterval({ok: true, power: "off"}, 20000, 2, true), 80000);
+});
+
 test("nextInterval backs off exponentially and caps at ten minutes", () => {
   assert.strictEqual(M.nextInterval({ok: false}, 90000, 1), 180000);
   assert.strictEqual(M.nextInterval({ok: false}, 90000, 2), 360000);
@@ -190,5 +203,6 @@ for (const [name, fn] of tests) {
   try { fn(); console.log(`ok    ${name}`); }
   catch (e) { failed++; console.error(`FAIL  ${name}\n      ${e.message}`); }
 }
+
 console.log(`\n${tests.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

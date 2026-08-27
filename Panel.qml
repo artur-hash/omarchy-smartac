@@ -52,13 +52,14 @@ Panel {
   // setpoint while the unit is off -- and answers COMPLETED all the same, so
   // the only honest confirmation is reading the state back.
   property var pending: null        // { kind, value, label }
-  property bool verifying: false    // true only while the panel's own verification read is in flight
   property int verifyAttempts: 0
 
-  // The requested value stands in for the read one while a write is in flight,
-  // so a button moves on the click instead of snapping back for six seconds.
-  function echo(kind, actual) {
-    return (panel.pending && panel.pending.kind === kind) ? panel.pending.value : actual
+  // A control the last write asked for but nothing has confirmed yet. It is
+  // drawn selected so the click registers, and dimmed so the panel never claims
+  // a state it has not read back -- the difference between "asked" and "done".
+  function isPending(kind, value) {
+    return panel.pending !== null && panel.pending.kind === kind
+      && panel.pending.value === String(value)
   }
 
   // null whenever it would merely repeat the air temperature, which is every
@@ -74,7 +75,7 @@ Panel {
   // also be opened through Ui/Panel's own IpcHandler, which never touches the
   // widget. Hanging it off the widget meant an IPC-opened panel showed its
   // initial state — a stored token rendered as the setup screen.
-  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.verifying = false; panel.refreshAll() }
+  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.refreshAll() }
 
   function refreshAll() {
     if (panel.bin === "") return
@@ -176,38 +177,44 @@ Panel {
     }
   }
 
+  // Verification reads through its own process rather than host.refresh(),
+  // which begins `if (reader.running) return` -- a poll already in flight made
+  // the verification a silent no-op, and because nothing then changed state,
+  // the pending write was never settled: the button kept showing the requested
+  // value forever and the failure message never came.
+  Process {
+    id: verifier
+    stdout: StdioCollector { id: verifyOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var st = Model.parseStatus(verifyOut.text)
+      // The panel paid for this read; the bar should not pay for it again.
+      if (st.ok && panel.host) panel.host.state = st
+      panel.settlePending(st)
+    }
+  }
+
   // One read, a beat after the write. Measured against the hardware: a mode
   // change surfaced four to six seconds after the command returned and a preset
   // took eight, so a single read at six seconds would have called a working
-  // preset broken. Two reads spaced out cost an extra pair of requests only
-  // when something really did not apply.
+  // preset broken. Two reads cost an extra pair of requests only when something
+  // really did not apply.
   Timer {
     id: verifyTimer
     interval: 8000
     repeat: false
     onTriggered: {
+      if (!panel.pending || !panel.host || panel.host.deviceId === "") { panel.pending = null; return }
       panel.verifyAttempts = panel.verifyAttempts + 1
-      panel.verifying = true
-      panel.refreshAll()
+      verifier.command = [panel.bin, "status", "--json", "--device", panel.host.deviceId]
+      verifier.running = true
     }
   }
 
-  // Only the read this panel asked for settles a pending write. The background
-  // poll also lands on host.state, and letting it answer would compare the
-  // request against a status fetched before the command was ever sent.
-  Connections {
-    target: panel.host
-    ignoreUnknownSignals: true
-    function onStateChanged() { panel.verifyPending() }
-  }
-
-  function verifyPending() {
-    if (!panel.pending || !panel.verifying) return
-    panel.verifying = false
-    var st = panel.host ? panel.host.state : null
+  function settlePending(st) {
+    if (!panel.pending) return
+    var want = panel.pending
     if (!st || !st.ok) { panel.pending = null; return }
 
-    var want = panel.pending
     var got = want.kind === "temp" ? String(st.setpoint) : String(st[want.kind] || "")
     if (got === want.value) { panel.pending = null; return }
 
@@ -219,6 +226,7 @@ Panel {
       + ". It is still " + (got === "" || got === "null" ? "unchanged" : got)
       + " — this unit ignores settings that do not apply to its current state."
   }
+
 
   // The token goes in on stdin. As an argument it would land in
   // /proc/<pid>/cmdline, readable by every process on this session — the same
@@ -341,14 +349,17 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             width: Style.space(30); height: Style.space(30)
             radius: Style.cornerRadius
-            readonly property bool on: panel.host && panel.echo("power", panel.host.state.power) === "on"
+            readonly property bool waiting: panel.pending !== null && panel.pending.kind === "power"
+            readonly property bool on: powerBox.waiting
+              ? panel.pending.value === "on"
+              : (panel.host && panel.host.state.power === "on")
             readonly property bool usable: panel.busy === "" && panel.host
               && panel.host.state.ok && panel.host.state.online
             color: on ? Style.selectedFillFor(panel.foreground, Color.accent) : "transparent"
             border.width: Style.spacing.hairline
             border.color: on ? Style.selectedBorderFor(panel.foreground, Color.accent)
                              : Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.35)
-            opacity: usable ? 1.0 : 0.45
+            opacity: !usable ? 0.45 : (powerBox.waiting ? 0.5 : 1.0)
 
             Text {
               anchors.centerIn: parent
@@ -510,7 +521,6 @@ Panel {
             required property string kind
             required property string current
             required property var options
-            readonly property string shown: panel.echo(kind, current)
             width: parent.width
             spacing: Style.space(4)
             Repeater {
@@ -520,7 +530,11 @@ Panel {
                 text: modelData
                 foreground: panel.foreground
                 fontFamily: panel.fontFamily
-                selected: modelData === shown
+                selected: modelData === current || panel.isPending(kind, modelData)
+                // Half strength until a read confirms it. The old build painted
+                // a requested value exactly like a confirmed one, so a command
+                // the device dropped looked like one it had honoured.
+                opacity: panel.isPending(kind, modelData) ? 0.5 : 1.0
                 enabled: panel.busy === "" && panel.host.state.online
                 onClicked: panel.setEnum(kind, modelData)
               }
@@ -596,6 +610,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 text: panel.shownSetpoint === null
                   ? "—" : (panel.shownSetpoint + "°" + panel.host.state.unit)
+                opacity: (panel.pending && panel.pending.kind === "temp") ? 0.5 : 1.0
                 color: panel.foreground
                 font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
               }

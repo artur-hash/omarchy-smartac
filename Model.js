@@ -127,11 +127,15 @@ function clampSetpoint(value, min, max) {
 
 // A device that is off does not change temperature on its own, so polling it
 // as often as a running one spends requests for nothing.
-function nextInterval(state, baseMs, consecutiveFailures) {
+function nextInterval(state, baseMs, consecutiveFailures, attended) {
   var base = Number(baseMs) || 90000
   var fails = Number(consecutiveFailures) || 0
   if (fails > 0) return Math.min(MAX_INTERVAL_MS, base * Math.pow(2, fails))
-  if (state && state.ok && state.power !== "on") return base * 2
+  // The doubling spares requests on a bar label nobody is reading. Someone
+  // watching the open panel is a different case: this hardware moves its own
+  // settings -- a mode change drops the preset -- and halving the cadence
+  // exactly when the user is clicking is backwards.
+  if (!attended && state && state.ok && state.power !== "on") return base * 2
   return base
 }
 

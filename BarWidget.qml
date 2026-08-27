@@ -24,6 +24,14 @@ Item {
 
   property var state: Model.emptyState()
   property int consecutiveFailures: 0
+
+  // Polling follows attention. Ninety seconds is right for a bar label nobody
+  // is looking at, and far too slow with the panel open: this hardware changes
+  // settings on its own -- a mode change drops the preset, each mode keeps its
+  // own setpoint -- and until the next poll the panel showed a control the
+  // device had already moved.
+  readonly property bool panelOpen: panelLoader.item ? panelLoader.item.opened : false
+  readonly property int pollBase: root.panelOpen ? 20000 : 90000
   readonly property string label: Model.barLabel(root.state)
   readonly property bool stale: root.consecutiveFailures > 0
 
@@ -75,13 +83,12 @@ Item {
         // claiming it is current. Staleness is shown, never hidden.
         root.consecutiveFailures = root.consecutiveFailures + 1
       }
-      poll.interval = Model.nextInterval(root.state, 90000, root.consecutiveFailures)
     }
   }
 
   Timer {
     id: poll
-    interval: 90000
+    interval: Model.nextInterval(root.state, root.pollBase, root.consecutiveFailures, root.panelOpen)
     repeat: true
     running: root.deviceId !== ""
     triggeredOnStart: true
