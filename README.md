@@ -1,5 +1,9 @@
 # SmartThings AC
 
+<p align="center">
+  <img src="preview.png" alt="The SmartThings AC panel, expanded" width="360">
+</p>
+
 Control an air conditioner from the Omarchy bar: power, target temperature,
 mode, fan speed, swing and presets. The bar shows the room temperature whether
 or not the unit is running, and the panel adds humidity and a feels-like figure.

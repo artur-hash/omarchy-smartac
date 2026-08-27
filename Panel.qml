@@ -371,7 +371,12 @@ Panel {
     // catcher owns it for arrow-key navigation.
     focusTarget: panel.hasToken ? keyCatcher : tokenField
     contentWidth: popup.fittedContentWidth(Style.space(320))
-    contentHeight: popup.fittedContentHeight(column.implicitHeight, Style.space(440))
+    // The cap has to clear the expanded content, or More reveals cards below
+    // the fold and reads as a button that does nothing. fittedContentHeight
+    // already limits by the space the screen actually has, so this only needs
+    // to be generous enough not to bite first; the Flickable still scrolls on
+    // a display too short for the whole panel.
+    contentHeight: popup.fittedContentHeight(column.implicitHeight, Style.space(760))
 
     // AfterItem so the TextField in the focus chain gets its keys first; only
     // what the focused subtree ignores bubbles back here.
