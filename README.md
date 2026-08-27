@@ -57,6 +57,25 @@ To remove it:
 
 Revoke it at [account.smartthings.com/tokens](https://account.smartthings.com/tokens).
 
+## When a setting does not take
+
+Some units silently ignore a command that does not apply to their current
+state. The cloud still answers `COMPLETED` — the device simply drops it. The
+panel reads the state back a few seconds after every write and says so when
+the value did not change, rather than showing a button that quietly springs
+back.
+
+Observed on a Samsung AR12BSEAAWKNAZ:
+
+- **WindFree only engages in `cool`.** In `auto` or `heat` the preset is
+  accepted and discarded.
+- **The setpoint cannot be changed while the unit is off.**
+- **Each mode keeps its own setpoint**, so the temperature shown changes on its
+  own when the mode does. That is the device remembering, not a misread.
+
+None of these rules are hardcoded. Other hardware has other constraints, and a
+list written here would go stale the first time a firmware update moved one.
+
 ## Diagnostics
 
 ```bash

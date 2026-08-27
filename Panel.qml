@@ -46,16 +46,35 @@ Panel {
 
   property bool showMore: false
 
+  // What the last write asked for, held until a later read either confirms it
+  // or shows the device dropped it. This hardware silently ignores a command
+  // that does not apply to its current state -- WindFree outside cool mode, a
+  // setpoint while the unit is off -- and answers COMPLETED all the same, so
+  // the only honest confirmation is reading the state back.
+  property var pending: null        // { kind, value, label }
+  property bool verifying: false    // true only while the panel's own verification read is in flight
+  property int verifyAttempts: 0
+
+  // The requested value stands in for the read one while a write is in flight,
+  // so a button moves on the click instead of snapping back for six seconds.
+  function echo(kind, actual) {
+    return (panel.pending && panel.pending.kind === kind) ? panel.pending.value : actual
+  }
+
   // null whenever it would merely repeat the air temperature, which is every
   // reading below the heat index's valid range. See Model.feelsLike.
   readonly property var feels: Model.feelsLike(panel.host ? panel.host.state : null)
+
+  readonly property var shownSetpoint: (panel.pending && panel.pending.kind === "temp")
+    ? parseInt(panel.pending.value)
+    : (panel.host ? panel.host.state.setpoint : null)
   readonly property string bin: host ? host.pluginDir + "bin/smartac" : ""
 
   // Refresh belongs here, not in the bar widget's togglePanel: the panel can
   // also be opened through Ui/Panel's own IpcHandler, which never touches the
   // widget. Hanging it off the widget meant an IPC-opened panel showed its
   // initial state — a stored token rendered as the setup screen.
-  onOpenedChanged: if (panel.opened) panel.refreshAll()
+  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.verifying = false; panel.refreshAll() }
 
   function refreshAll() {
     if (panel.bin === "") return
@@ -74,12 +93,17 @@ Panel {
   function setEnum(kind, value) {
     if (!panel.host || panel.host.deviceId === "") return
     panel.busy = kind
-    panel.run([kind, value, "--device", panel.host.deviceId])
+    panel.pending = { kind: kind, value: String(value), label: kind }
+    // --no-validate: these buttons are built from the device's own supported
+    // list, so the backend's validating GET would re-fetch what is already on
+    // screen. Requests are the scarce resource here, not correctness.
+    panel.run([kind, value, "--device", panel.host.deviceId, "--no-validate"])
   }
 
   function setTemp(value) {
     var v = Model.clampSetpoint(value, panel.minSetpoint, panel.maxSetpoint)
     panel.busy = "temp"
+    panel.pending = { kind: "temp", value: String(v), label: "temperature" }
     panel.run(["temp", String(v), "--device", panel.host.deviceId])
   }
 
@@ -140,9 +164,60 @@ Panel {
         var msg = ""
         try { msg = JSON.parse(String(actionErr.text || "")).error || "" } catch (e) {}
         panel.actionError = msg !== "" ? msg : "Command failed."
+        panel.pending = null
+        panel.refreshAll()
+        return
       }
+      // The cloud accepting a command is not the device applying it, and the
+      // reported state lags the write. Reading now returns the old value and
+      // looks like a failure, so the read waits.
+      panel.verifyAttempts = 0
+      verifyTimer.restart()
+    }
+  }
+
+  // One read, a beat after the write. Measured against the hardware: a mode
+  // change surfaced four to six seconds after the command returned and a preset
+  // took eight, so a single read at six seconds would have called a working
+  // preset broken. Two reads spaced out cost an extra pair of requests only
+  // when something really did not apply.
+  Timer {
+    id: verifyTimer
+    interval: 8000
+    repeat: false
+    onTriggered: {
+      panel.verifyAttempts = panel.verifyAttempts + 1
+      panel.verifying = true
       panel.refreshAll()
     }
+  }
+
+  // Only the read this panel asked for settles a pending write. The background
+  // poll also lands on host.state, and letting it answer would compare the
+  // request against a status fetched before the command was ever sent.
+  Connections {
+    target: panel.host
+    ignoreUnknownSignals: true
+    function onStateChanged() { panel.verifyPending() }
+  }
+
+  function verifyPending() {
+    if (!panel.pending || !panel.verifying) return
+    panel.verifying = false
+    var st = panel.host ? panel.host.state : null
+    if (!st || !st.ok) { panel.pending = null; return }
+
+    var want = panel.pending
+    var got = want.kind === "temp" ? String(st.setpoint) : String(st[want.kind] || "")
+    if (got === want.value) { panel.pending = null; return }
+
+    // Give a slow device one more chance before calling it a failure.
+    if (panel.verifyAttempts < 2) { verifyTimer.restart(); return }
+
+    panel.pending = null
+    panel.actionError = "The device did not apply " + want.label + " " + want.value
+      + ". It is still " + (got === "" || got === "null" ? "unchanged" : got)
+      + " — this unit ignores settings that do not apply to its current state."
   }
 
   // The token goes in on stdin. As an argument it would land in
@@ -266,7 +341,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             width: Style.space(30); height: Style.space(30)
             radius: Style.cornerRadius
-            readonly property bool on: panel.host && panel.host.state.power === "on"
+            readonly property bool on: panel.host && panel.echo("power", panel.host.state.power) === "on"
             readonly property bool usable: panel.busy === "" && panel.host
               && panel.host.state.ok && panel.host.state.online
             color: on ? Style.selectedFillFor(panel.foreground, Color.accent) : "transparent"
@@ -289,8 +364,10 @@ Panel {
               enabled: powerBox.usable
               cursorShape: Qt.PointingHandCursor
               onClicked: {
+                var want = powerBox.on ? "off" : "on"
                 panel.busy = "power"
-                panel.run(["power", powerBox.on ? "off" : "on", "--device", panel.host.deviceId])
+                panel.pending = { kind: "power", value: want, label: "power" }
+                panel.run(["power", want, "--device", panel.host.deviceId])
               }
             }
           }
@@ -433,6 +510,7 @@ Panel {
             required property string kind
             required property string current
             required property var options
+            readonly property string shown: panel.echo(kind, current)
             width: parent.width
             spacing: Style.space(4)
             Repeater {
@@ -442,7 +520,7 @@ Panel {
                 text: modelData
                 foreground: panel.foreground
                 fontFamily: panel.fontFamily
-                selected: modelData === current
+                selected: modelData === shown
                 enabled: panel.busy === "" && panel.host.state.online
                 onClicked: panel.setEnum(kind, modelData)
               }
@@ -511,21 +589,21 @@ Panel {
               PanelActionButton {
                 iconText: "-"; tooltipText: "Cooler"
                 foreground: panel.foreground; fontFamily: panel.fontFamily
-                enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
-                onClicked: panel.setTemp(panel.host.state.setpoint - 1)
+                enabled: panel.busy === "" && panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.setTemp(panel.shownSetpoint - 1)
               }
               Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: panel.host.state.setpoint === null
-                  ? "—" : (panel.host.state.setpoint + "°" + panel.host.state.unit)
+                text: panel.shownSetpoint === null
+                  ? "—" : (panel.shownSetpoint + "°" + panel.host.state.unit)
                 color: panel.foreground
                 font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
               }
               PanelActionButton {
                 iconText: "+"; tooltipText: "Warmer"
                 foreground: panel.foreground; fontFamily: panel.fontFamily
-                enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
-                onClicked: panel.setTemp(panel.host.state.setpoint + 1)
+                enabled: panel.busy === "" && panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.setTemp(panel.shownSetpoint + 1)
               }
             }
           }

@@ -156,11 +156,22 @@ cmd_status() {
 # ---------------------------------------------------------------- commands --
 
 send_command() {
-  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body
+  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body verdict
   body=$(jq -cn --arg c "$capability" --arg k "$command" --argjson a "$args_json" \
     '{commands:[{component:"main", capability:$c, command:$k, arguments:$a}]}')
-  api POST "/devices/$device/commands" "$body" >/dev/null
-  printf '{"ok":true}\n'
+  # A refused command is not an HTTP error: the API answers 200 and puts the
+  # verdict in results[].status. Printing ok without reading it would report a
+  # success the cloud never claimed. An absent results array is treated as
+  # success -- some deployments omit it, and inventing a failure is worse than
+  # trusting the 2xx.
+  verdict=$(api POST "/devices/$device/commands" "$body" | jq -r '
+    if (.results | type) == "array" and (.results | length) > 0
+    then ([.results[].status] | map(select(. != "COMPLETED" and . != "ACCEPTED")) | .[0] // "COMPLETED")
+    else "COMPLETED" end' 2>/dev/null)
+  case "$verdict" in
+    COMPLETED|ACCEPTED|"") printf '{"ok":true}\n' ;;
+    *) die "SmartThings refused the command ($verdict)" 8 ;;
+  esac
 }
 
 cmd_power() {
@@ -177,12 +188,20 @@ cmd_power() {
   send_command "$device" switch "$state"
 }
 
-# Validates against what the device publishes as supported, then sends. One
-# extra GET per write, which is the price of not shipping a hardcoded list that
-# silently diverges from the hardware.
+# Validates against what the device publishes as supported, then sends. That
+# costs one extra GET per write, which is the price of not shipping a hardcoded
+# list that silently diverges from the hardware -- but only for a caller that
+# does not already hold the list. The panel builds its buttons from the very
+# same supported arrays, so it cannot offer an unsupported value, and it passes
+# --no-validate to skip the round trip. Its safety net is send_command, which
+# now surfaces a refusal the API reports.
 send_enum_command() {
-  local device="$1" value="$2" capability="$3" command="$4" jqpath="$5" label="$6"
+  local device="$1" value="$2" capability="$3" command="$4" jqpath="$5" label="$6" validate="${7:-1}"
   local supported
+  if [[ $validate != 1 ]]; then
+    send_command "$device" "$capability" "$command" "$(jq -cn --arg v "$value" '[$v]')"
+    return
+  fi
   supported=$(api GET "/devices/$device/status" \
     | jq -r --arg p "$jqpath" '.components.main[$p] // {} | to_entries[]
         | select(.key | startswith("supported")) | .value.value // [] | .[]' 2>/dev/null | sort -u)
@@ -196,19 +215,20 @@ cmd_enum() {
   local kind="$1"; shift
   local value="${1:-}"; shift || true
   [[ -n $value ]] || die "usage: smartac $kind <value> --device <id>" 2
-  local device=""
+  local device="" validate=1
   while (( $# )); do
     case "$1" in
-      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      --device)      [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      --no-validate) validate=0; shift ;;
       *) die "unknown argument: $1" 2 ;;
     esac
   done
   require_device "$device"
   case "$kind" in
-    mode)   send_enum_command "$device" "$value" airConditionerMode setAirConditionerMode airConditionerMode mode ;;
-    fan)    send_enum_command "$device" "$value" airConditionerFanMode setFanMode airConditionerFanMode fan ;;
-    swing)  send_enum_command "$device" "$value" fanOscillationMode setFanOscillationMode fanOscillationMode swing ;;
-    preset) send_enum_command "$device" "$value" custom.airConditionerOptionalMode setAcOptionalMode custom.airConditionerOptionalMode preset ;;
+    mode)   send_enum_command "$device" "$value" airConditionerMode setAirConditionerMode airConditionerMode mode "$validate" ;;
+    fan)    send_enum_command "$device" "$value" airConditionerFanMode setFanMode airConditionerFanMode fan "$validate" ;;
+    swing)  send_enum_command "$device" "$value" fanOscillationMode setFanOscillationMode fanOscillationMode swing "$validate" ;;
+    preset) send_enum_command "$device" "$value" custom.airConditionerOptionalMode setAcOptionalMode custom.airConditionerOptionalMode preset "$validate" ;;
   esac
 }
 

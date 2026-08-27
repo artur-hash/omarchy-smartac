@@ -499,12 +499,82 @@ test_status_carries_supported_lists_and_range() {
   teardown
 }
 
+# The API answers 200 for a command it refuses and puts the verdict in
+# results[].status. Reporting ok on that told the panel a command landed when
+# the cloud had already said it did not.
+test_refused_command_is_not_reported_as_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{"results":[{"id":"x","status":"FAILED"}]}' > "$TMP/refused.json"
+  fake_curl 200 "$TMP/refused.json"
+  out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
+  check "a FAILED verdict exits 8" "$rc" "8"
+  grep -q 'FAILED' <<<"$out" && ok "the error names the verdict" || bad "the error names the verdict" "$out"
+  teardown
+}
+
+test_completed_command_is_reported_as_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{"results":[{"id":"x","status":"COMPLETED"}]}' > "$TMP/done.json"
+  fake_curl 200 "$TMP/done.json"
+  out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
+  check "a COMPLETED verdict exits 0" "$rc" "0"
+  check "and prints ok" "$out" '{"ok":true}'
+  teardown
+}
+
+# A response with no results array still counts as success: some deployments
+# omit it, and inventing a failure is worse than trusting the 2xx.
+test_missing_results_array_is_still_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{}' > "$TMP/bare.json"
+  fake_curl 200 "$TMP/bare.json"
+  rc=0; "$ROOT/bin/smartac" power on --device ac-1 >/dev/null 2>&1 || rc=$?
+  check "an absent results array exits 0" "$rc" "0"
+  teardown
+}
+
+# The panel builds its buttons from the device's own supported list, so the
+# validating GET re-fetches what is already on screen. Requests are the scarce
+# resource: this token hit SmartThings' rate limit during development at
+# roughly sixteen requests in nine seconds.
+test_no_validate_skips_the_lookup_request() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 --no-validate >/dev/null 2>&1
+  gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
+  check "--no-validate makes no GET" "$gets" "0"
+  grep -q '"command":"setAirConditionerMode"' "$TMP/curl.args" \
+    && ok "--no-validate still sends the command" || bad "--no-validate still sends the command" "$(cat "$TMP/curl.args")"
+  teardown
+}
+
+# Without the flag the lookup stays, so a CLI user still gets told what the
+# device accepts instead of a bare refusal.
+test_validation_still_runs_by_default() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null 2>&1
+  gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
+  check "the default path still looks up supported values" "$gets" "1"
+  teardown
+}
+
 test_mode_sends_setAirConditionerMode
 test_mode_rejects_unsupported_value
 test_fan_sends_setFanMode
 test_swing_sends_setFanOscillationMode
 test_preset_sends_setAcOptionalMode
 test_status_carries_supported_lists_and_range
+test_refused_command_is_not_reported_as_success
+test_completed_command_is_reported_as_success
+test_missing_results_array_is_still_success
+test_no_validate_skips_the_lookup_request
+test_validation_still_runs_by_default
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
