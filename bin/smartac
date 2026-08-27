@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# SmartThings AC backend. Owns every HTTP call and the keyring token; prints
+# JSON on stdout and nothing else, so the QML never parses prose.
+set -uo pipefail
+
+API="https://api.smartthings.com/v1"
+SECRET_SERVICE="smartac"
+
+die()  { printf '{"error":%s}\n' "$(jq -Rn --arg m "$1" '$m')" >&2; exit "${2:-1}"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1" 4; }
+need jq
+
+# ------------------------------------------------------------------- token --
+
+read_token() {
+  local t
+  t=$(secret-tool lookup service "$SECRET_SERVICE" key token 2>/dev/null) || return 1
+  [[ -n $t ]] || return 1
+  printf '%s' "$t"
+}
+
+cmd_token() {
+  case "${1:-}" in
+    set)
+      # stdin only. An argument would land in /proc/<pid>/cmdline, which every
+      # process running as this user can read while the call is in flight.
+      [[ $# -eq 1 ]] || die "pass the token on stdin, not as an argument" 2
+      [[ -t 0 ]] && die "pass the token on stdin, not as an argument" 2
+      need secret-tool
+      local raw
+      raw=$(cat)
+      # Reject anything but a plain token. A control character — a bare
+      # newline above all — turns into a second record when this token is
+      # later written into curl's -K config format (see api(), below): the
+      # continuation line is parsed as a bogus option and echoed to curl's
+      # stderr, which is how a token fragment used to reach the journal.
+      # Whitespace-only input is rejected too: secret-tool would happily
+      # store it, and the panel would sit on the setup screen forever with
+      # nothing telling the user why.
+      [[ -n "${raw//[[:space:]]/}" ]] || die "token is empty" 2
+      [[ "$raw" =~ [[:cntrl:]] ]] && die "token contains control characters" 2
+      printf '%s' "$raw" | secret-tool store --label="SmartThings AC token" \
+        service "$SECRET_SERVICE" key token || die "could not write to the keyring" 5
+      printf '{"ok":true}\n' ;;
+    clear)
+      need secret-tool
+      secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
+      printf '{"ok":true}\n' ;;
+    status)
+      need secret-tool
+      if read_token >/dev/null 2>&1; then printf '{"hasToken":true}\n'
+      else printf '{"hasToken":false}\n'; fi ;;
+    *) die "usage: smartac token set|clear|status" 2 ;;
+  esac
+}
+
+# --------------------------------------------------------------------- api --
+
+api() {
+  need curl
+  local method="$1" path="$2" body="${3:-}" token raw status out token_escaped
+  token=$(read_token) || die "no token stored" 2
+
+  # Escape backslashes and double quotes in token for curl's config format.
+  # SmartThings tokens are opaque strings unlikely to contain these characters,
+  # but escaping them ensures the header is formed correctly if they do.
+  token_escaped="${token//\\/\\\\}"
+  token_escaped="${token_escaped//\"/\\\"}"
+
+  local args=(-sS -X "$method" -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
+  [[ -n $body ]] && args+=(-H "Content-Type: application/json" -d "$body")
+
+  # curl's own stderr is silenced: a malformed -K record (see cmd_token's
+  # control-character check) makes curl echo the offending config line back
+  # on stderr, and this process's stderr is not collected by the QML side —
+  # it would otherwise flow straight into the shell's journal.
+  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | curl -K - "${args[@]}" "$API$path" 2>/dev/null) || die "network unreachable" 6
+  status="${raw##*$'\n'}"
+  out="${raw%$'\n'*}"
+
+  case "$status" in
+    2*)  printf '%s' "$out" ;;
+    401) secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
+         die "the token was rejected; enter a new one" 3 ;;
+    429) die "rate limited by SmartThings" 7 ;;
+    *)   die "SmartThings returned HTTP $status" 8 ;;
+  esac
+}
+
+# ----------------------------------------------------------------- devices --
+
+cmd_devices() {
+  # airConditionerMode, not switch: switch alone matches every lamp in the
+  # account, and a picker full of lamps is worse than no picker.
+  api GET /devices | jq '{
+    devices: [ .items[]
+      | select(any(.components[]?.capabilities[]?; .id == "airConditionerMode"))
+      | { id: .deviceId, label: (.label // .name // .deviceId) } ]
+  }'
+}
+
+# ------------------------------------------------------------------ status --
+
+require_device() { [[ -n ${1:-} ]] || die "pass --device <id>" 2; }
+
+cmd_status() {
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      --json)   shift ;;
+      *)        die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+
+  # Two calls. /status answers with the last values it saw and says nothing
+  # about reachability, so an unplugged AC returns yesterday's numbers and
+  # looks healthy. /health is the only thing that tells the two apart.
+  local health online
+  health=$(api GET "/devices/$device/health") || exit $?
+  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
+  [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
+
+  api GET "/devices/$device/status" | jq --argjson online "$online" '
+    .components.main as $m | {
+      power:       ($m.switch.switch.value // "off"),
+      temperature: ($m.temperatureMeasurement.temperature.value // null),
+      setpoint:    ($m.thermostatCoolingSetpoint.coolingSetpoint.value // null),
+      unit:        ($m.temperatureMeasurement.temperature.unit // "C"),
+      online:      $online
+    }'
+}
+
+# ---------------------------------------------------------------- commands --
+
+send_command() {
+  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body
+  body=$(jq -cn --arg c "$capability" --arg k "$command" --argjson a "$args_json" \
+    '{commands:[{component:"main", capability:$c, command:$k, arguments:$a}]}')
+  api POST "/devices/$device/commands" "$body" >/dev/null
+  printf '{"ok":true}\n'
+}
+
+cmd_power() {
+  local state="${1:-}"; shift || true
+  [[ $state == on || $state == off ]] || die "usage: smartac power on|off --device <id>" 2
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      *)        die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+  send_command "$device" switch "$state"
+}
+
+cmd_temp() {
+  local value="${1:-}"; shift || true
+  [[ $value =~ ^-?[0-9]+([.][0-9]+)?$ ]] || die "temperature must be a number" 2
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      *)        die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+  # --argjson, not --arg: the API rejects a quoted number for this argument.
+  send_command "$device" thermostatCoolingSetpoint setCoolingSetpoint "[$value]"
+}
+
+# ------------------------------------------------------------------ doctor --
+
+cmd_doctor() {
+  local caps=0 device=""
+  while (( $# )); do
+    case "$1" in
+      --capabilities) caps=1; shift ;;
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if (( caps )); then
+    require_device "$device"
+    local devices_payload capabilities_list device_found
+    devices_payload=$(api GET /devices) || return 1
+    capabilities_list=$(jq -r --arg d "$device" '.items[] | select(.deviceId == $d)
+          | .components[]?.capabilities[]?.id' <<<"$devices_payload" | sort)
+    device_found=$(jq -r --arg d "$device" '[.items[] | select(.deviceId == $d)] | length' <<<"$devices_payload")
+    if [[ $device_found -eq 0 ]]; then
+      die "device not found: $device" 2
+    fi
+    printf '%s\n' "$capabilities_list"
+    return 0
+  fi
+
+  printf 'SmartThings AC doctor\n\n'
+  for c in curl jq secret-tool; do
+    command -v "$c" >/dev/null 2>&1 \
+      && printf '  ok    %s\n' "$c" || printf '  FAIL  %s is missing\n' "$c"
+  done
+
+  local t
+  if t=$(read_token 2>/dev/null); then
+    # Four characters tells two tokens apart and is not enough to use one.
+    printf '  ok    token stored (%s...)\n' "${t:0:4}"
+  else
+    printf '  FAIL  no token stored\n'; return 1
+  fi
+
+  local devices_json
+  devices_json=$(cmd_devices) || return 1
+  local n
+  n=$(jq -r '.devices | length' <<<"$devices_json") || die "failed to parse devices" 8
+  printf '  ok    reachable, %s air conditioner(s) visible\n' "$n"
+}
+
+case "${1:-}" in
+  token)   shift; cmd_token "$@" ;;
+  devices) cmd_devices ;;
+  status)  shift; cmd_status "$@" ;;
+  power)   shift; cmd_power "$@" ;;
+  temp)    shift; cmd_temp "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
+esac

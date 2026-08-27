@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "arturhash.smartac",
+  "name": "SmartThings AC",
+  "version": "0.1.0",
+  "author": "artur-hash",
+  "license": "MIT",
+  "description": "Turn an air conditioner on and off and set its temperature from the bar, through the SmartThings API.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "SmartThings AC",
+    "description": "Air conditioner power and temperature",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}
