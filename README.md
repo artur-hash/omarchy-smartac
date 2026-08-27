@@ -63,7 +63,7 @@ process running as you.
 To remove it:
 
 ```bash
-~/.config/omarchy/plugins/arturhash.smartac/bin/smartac token clear
+~/.config/omarchy/plugins/io.github.artur-hash.smartac/bin/smartac token clear
 ```
 
 Revoke it at [account.smartthings.com/tokens](https://account.smartthings.com/tokens).
@@ -106,7 +106,7 @@ quickest way to find out why a control is missing.
 ## Removal
 
 ```bash
-omarchy plugin remove arturhash.smartac
+omarchy plugin remove io.github.artur-hash.smartac
 ```
 
 Nothing is left behind but the keyring entry, which `token clear` removes.

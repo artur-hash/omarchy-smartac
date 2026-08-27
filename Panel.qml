@@ -19,8 +19,8 @@ import "Model.js" as Model
 Panel {
   id: panel
 
-  moduleName: "arturhash.smartac"
-  ipcTarget: "arturhash.smartac"   // enables `omarchy-shell arturhash.smartac toggle`
+  moduleName: "io.github.artur-hash.smartac"
+  ipcTarget: "io.github.artur-hash.smartac"   // enables `omarchy-shell io.github.artur-hash.smartac toggle`
 
   property QtObject host: null
   property Item anchorButton: null   // the visible bar button, set by BarWidget
