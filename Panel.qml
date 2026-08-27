@@ -20,8 +20,10 @@ Panel {
   id: panel
 
   moduleName: "arturhash.smartac"
+  ipcTarget: "arturhash.smartac"   // enables `omarchy-shell arturhash.smartac toggle`
 
   property QtObject host: null
+  property Item anchorButton: null   // the visible bar button, set by BarWidget
   property color foreground: Color.foreground     // bound by the Loader in BarWidget.qml
   property string fontFamily: Style.font.family   // bound by the Loader in BarWidget.qml
   property bool hasToken: false
@@ -79,7 +81,8 @@ Panel {
     id: tokenCheck
     command: [panel.bin, "token", "status", "--json"]
     stdout: StdioCollector { id: tokenOut; waitForEnd: true }
-    onExited: {
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { panel.hasToken = false; return }
       try { panel.hasToken = JSON.parse(String(tokenOut.text)).hasToken === true }
       catch (e) { panel.hasToken = false }
       if (panel.hasToken) deviceList.running = true
@@ -90,7 +93,15 @@ Panel {
     id: deviceList
     command: [panel.bin, "devices", "--json"]
     stdout: StdioCollector { id: devOut; waitForEnd: true }
-    onExited: {
+    onExited: function(exitCode) {
+      panel.devices = []
+      // Exit 3 means the backend got a 401 and has already deleted the token
+      // from the keyring. Without re-reading it here the panel kept hasToken
+      // true against a credential that no longer exists, showed an empty
+      // picker instead of the setup screen, and left no way to enter a new
+      // token short of restarting the shell.
+      if (exitCode === 3) { panel.hasToken = false; panel.actionError = "The token was rejected. Enter a new one."; return }
+      if (exitCode !== 0) return
       try { panel.devices = JSON.parse(String(devOut.text)).devices || [] }
       catch (e) { panel.devices = [] }
     }
@@ -115,15 +126,37 @@ Panel {
   // reason the shell's own network panel pipes 802.1X secrets this way.
   Process {
     id: tokenSet
+    stderr: StdioCollector { id: tokenSetErr; waitForEnd: true }
     property string pending: ""
     command: [panel.bin, "token", "set"]
     stdinEnabled: true
     onStarted: {
       write(tokenSet.pending)
       tokenSet.pending = ""
+      // Closing stdin is required — the backend's `secret-tool store` reads
+      // until EOF and would otherwise hang. But this is an imperative write
+      // over a declared property, so it does not reset itself: saveToken has
+      // to turn it back on before every run, or the second token of the
+      // session reaches the backend with empty stdin and is rejected as
+      // "token is empty". That is the bug where a correct token pasted after
+      // a rejected one only worked again after a shell restart, because the
+      // restart rebuilt the Process with its declared value.
       stdinEnabled = false
     }
-    onExited: panel.refreshAll()
+    onExited: function(exitCode) {
+      // The only screen where the user types something and needs to be told
+      // it was refused. The backend rejects empty, whitespace-only and
+      // control-character tokens; without this those all looked like nothing
+      // happening at all.
+      if (exitCode !== 0) {
+        var msg = "Could not save the token."
+        try { msg = JSON.parse(String(tokenSetErr.text)).error || msg } catch (e) {}
+        panel.actionError = msg
+        return
+      }
+      panel.actionError = ""
+      panel.refreshAll()
+    }
   }
 
   function saveToken(value) {
@@ -135,18 +168,38 @@ Panel {
     var trimmed = String(value || "").trim()
     if (trimmed === "") return
     tokenSet.pending = trimmed
+    tokenSet.stdinEnabled = true   // see onStarted: this does not reset itself
     tokenSet.running = true
     tokenField.text = ""
   }
 
-  PopupCard {
+  // KeyboardPanel, not PopupCard. PopupCard is a bare PopupWindow with no
+  // keyboard-focus handling at all, so the token TextField inside it could
+  // never take input — clicking it did nothing. KeyboardPanel is what every
+  // first-party panel with an input uses (see the wifi passphrase field in
+  // plugins/panels/network); it owns focus priming, anchored-to-icon
+  // positioning, outside-click dismissal and the fade.
+  KeyboardPanel {
     id: popup
-    anchorItem: panel.host
+    anchorItem: panel.anchorButton
     owner: panel
     bar: panel.bar
     open: panel.opened
+    // Focus goes to the token field while there is no token, because that is
+    // the only thing the user can do on that screen. Once configured, the key
+    // catcher owns it for arrow-key navigation.
+    focusTarget: panel.hasToken ? keyCatcher : tokenField
     contentWidth: popup.fittedContentWidth(Style.space(320))
     contentHeight: popup.fittedContentHeight(column.implicitHeight, Style.space(440))
+
+    // AfterItem so the TextField in the focus chain gets its keys first; only
+    // what the focused subtree ignores bubbles back here.
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      Keys.priority: Keys.AfterItem
+      blocked: !panel.hasToken
+    }
 
     Flickable {
       anchors.fill: parent
@@ -161,6 +214,20 @@ Panel {
         id: column
         width: parent.width
         spacing: Style.space(12)
+
+        // Backend errors live above the three state blocks, not inside the
+        // controls: the screen that most needs one is the setup screen, where
+        // a rejected token used to look exactly like nothing happening.
+        Text {
+          visible: panel.actionError !== ""
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: panel.actionError
+          textFormat: Text.PlainText
+          color: Color.urgent
+          font.family: panel.fontFamily
+          font.pixelSize: Style.font.caption
+        }
 
         // ---- State 1: setup
         Column {
@@ -270,19 +337,6 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          // Not per-exit-code messaging — just the backend's own error text
-          // (bin/smartac's `error` field), so a rejected command is visibly
-          // different from a slow one instead of silently reverting.
-          Text {
-            visible: panel.actionError !== ""
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: panel.actionError
-            textFormat: Text.PlainText
-            color: Color.urgent
-            font.family: panel.fontFamily
-            font.pixelSize: Style.font.caption
-          }
 
           Row {
             width: parent.width
