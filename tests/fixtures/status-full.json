@@ -1,0 +1,93 @@
+{
+  "components": {
+    "main": {
+      "switch": {
+        "switch": {
+          "value": "on"
+        }
+      },
+      "temperatureMeasurement": {
+        "temperature": {
+          "value": 24.5,
+          "unit": "C"
+        }
+      },
+      "thermostatCoolingSetpoint": {
+        "coolingSetpoint": {
+          "value": 22,
+          "unit": "C"
+        }
+      },
+      "airConditionerMode": {
+        "airConditionerMode": {
+          "value": "heat"
+        },
+        "supportedAcModes": {
+          "value": [
+            "auto",
+            "cool",
+            "dry",
+            "wind",
+            "heat"
+          ]
+        }
+      },
+      "airConditionerFanMode": {
+        "fanMode": {
+          "value": "low"
+        },
+        "supportedAcFanModes": {
+          "value": [
+            "auto",
+            "low",
+            "medium",
+            "high",
+            "turbo"
+          ]
+        }
+      },
+      "fanOscillationMode": {
+        "fanOscillationMode": {
+          "value": "fixed"
+        },
+        "supportedFanOscillationModes": {
+          "value": [
+            "fixed",
+            "vertical",
+            "horizontal",
+            "all"
+          ]
+        }
+      },
+      "custom.airConditionerOptionalMode": {
+        "acOptionalMode": {
+          "value": "off"
+        },
+        "supportedAcOptionalMode": {
+          "value": [
+            "off",
+            "sleep",
+            "quiet",
+            "smart",
+            "speed",
+            "windFree",
+            "windFreeSleep"
+          ]
+        }
+      },
+      "relativeHumidityMeasurement": {
+        "humidity": {
+          "value": 61
+        }
+      },
+      "custom.thermostatSetpointControl": {
+        "minimumSetpoint": {
+          "value": 16
+        },
+        "maximumSetpoint": {
+          "value": 30
+        }
+      }
+    }
+  }
+}

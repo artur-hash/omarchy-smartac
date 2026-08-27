@@ -128,7 +128,28 @@ cmd_status() {
       temperature: ($m.temperatureMeasurement.temperature.value // null),
       setpoint:    ($m.thermostatCoolingSetpoint.coolingSetpoint.value // null),
       unit:        ($m.temperatureMeasurement.temperature.unit // "C"),
-      online:      $online
+      online:      $online,
+
+      mode:    ($m.airConditionerMode.airConditionerMode.value // null),
+      fan:     ($m.airConditionerFanMode.fanMode.value // null),
+      swing:   ($m.fanOscillationMode.fanOscillationMode.value // null),
+      preset:  ($m["custom.airConditionerOptionalMode"].acOptionalMode.value // null),
+      humidity: ($m.relativeHumidityMeasurement.humidity.value // null),
+
+      # The lists the device itself publishes. The panel builds its pills from
+      # these rather than from a hardcoded set, so a firmware update that drops
+      # a mode removes its button without a code change.
+      supported: {
+        mode:   ($m.airConditionerMode.supportedAcModes.value // []),
+        fan:    ($m.airConditionerFanMode.supportedAcFanModes.value // []),
+        swing:  ($m.fanOscillationMode.supportedFanOscillationModes.value // []),
+        preset: ($m["custom.airConditionerOptionalMode"].supportedAcOptionalMode.value // [])
+      },
+
+      # Read from the device, not assumed. The old hardcoded 16-30 happened to
+      # match this unit; on another one it would have been wrong.
+      setpointMin: ($m["custom.thermostatSetpointControl"].minimumSetpoint.value // null),
+      setpointMax: ($m["custom.thermostatSetpointControl"].maximumSetpoint.value // null)
     }'
 }
 
@@ -154,6 +175,41 @@ cmd_power() {
   done
   require_device "$device"
   send_command "$device" switch "$state"
+}
+
+# Validates against what the device publishes as supported, then sends. One
+# extra GET per write, which is the price of not shipping a hardcoded list that
+# silently diverges from the hardware.
+send_enum_command() {
+  local device="$1" value="$2" capability="$3" command="$4" jqpath="$5" label="$6"
+  local supported
+  supported=$(api GET "/devices/$device/status" \
+    | jq -r --arg p "$jqpath" '.components.main[$p] // {} | to_entries[]
+        | select(.key | startswith("supported")) | .value.value // [] | .[]' 2>/dev/null | sort -u)
+  [[ -n $supported ]] || die "the device published no supported $label values" 9
+  grep -qxF -- "$value" <<<"$supported" \
+    || die "$label '$value' is not supported by this device; supported: $(tr '\n' ' ' <<<"$supported" | sed 's/ $//')" 2
+  send_command "$device" "$capability" "$command" "$(jq -cn --arg v "$value" '[$v]')"
+}
+
+cmd_enum() {
+  local kind="$1"; shift
+  local value="${1:-}"; shift || true
+  [[ -n $value ]] || die "usage: smartac $kind <value> --device <id>" 2
+  local device=""
+  while (( $# )); do
+    case "$1" in
+      --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      *) die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+  case "$kind" in
+    mode)   send_enum_command "$device" "$value" airConditionerMode setAirConditionerMode airConditionerMode mode ;;
+    fan)    send_enum_command "$device" "$value" airConditionerFanMode setFanMode airConditionerFanMode fan ;;
+    swing)  send_enum_command "$device" "$value" fanOscillationMode setFanOscillationMode fanOscillationMode swing ;;
+    preset) send_enum_command "$device" "$value" custom.airConditionerOptionalMode setAcOptionalMode custom.airConditionerOptionalMode preset ;;
+  esac
 }
 
 cmd_temp() {
@@ -224,6 +280,7 @@ case "${1:-}" in
   status)  shift; cmd_status "$@" ;;
   power)   shift; cmd_power "$@" ;;
   temp)    shift; cmd_temp "$@" ;;
+  mode|fan|swing|preset) k="$1"; shift; cmd_enum "$k" "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac

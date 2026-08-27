@@ -423,5 +423,88 @@ test_doctor_redacts_the_token
 test_doctor_capabilities_lists_raw_ids
 test_doctor_capabilities_errors_on_unknown_device
 
+# ---- full AC scope: mode / fan / swing / preset ----
+
+# Each of these is validated against the list the device itself publishes, not
+# against a list hardcoded here — a device that drops "turbo" should reject it
+# without a code change.
+test_mode_sends_setAirConditionerMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"airConditionerMode"' <<<"$args" && ok "mode capability" || bad "mode capability" "$args"
+  grep -q '"command":"setAirConditionerMode"'  <<<"$args" && ok "mode command"    || bad "mode command" "$args"
+  grep -q '"arguments":\["cool"\]'            <<<"$args" && ok "mode argument"   || bad "mode argument" "$args"
+  teardown
+}
+
+test_mode_rejects_unsupported_value() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" mode banana --device ac-1 2>&1); rc=$?
+  check "an unsupported mode exits 2" "$rc" "2"
+  grep -q "supported" <<<"$out" && ok "the refusal names what is supported" || bad "refusal" "$out"
+  teardown
+}
+
+test_fan_sends_setFanMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" fan turbo --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"airConditionerFanMode"' <<<"$args" && ok "fan capability" || bad "fan capability" "$args"
+  grep -q '"command":"setFanMode"'                <<<"$args" && ok "fan command"   || bad "fan command" "$args"
+  teardown
+}
+
+test_swing_sends_setFanOscillationMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" swing all --device ac-1 >/dev/null
+  grep -q '"command":"setFanOscillationMode"' "$TMP/curl.args" && ok "swing command" || bad "swing command" "$(cat "$TMP/curl.args")"
+  teardown
+}
+
+test_preset_sends_setAcOptionalMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" preset windFree --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"custom.airConditionerOptionalMode"' <<<"$args" && ok "preset capability" || bad "preset capability" "$args"
+  grep -q '"command":"setAcOptionalMode"' <<<"$args" && ok "preset command" || bad "preset command" "$args"
+  teardown
+}
+
+test_status_carries_supported_lists_and_range() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status-full.json" <(echo '{"state":"ONLINE"}') >"$TMP/both.json"
+  fake_curl 200 "$TMP/both.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  check "current mode"     "$(jq -r .mode <<<"$out")"                  "heat"
+  check "current fan"      "$(jq -r .fan <<<"$out")"                   "low"
+  check "current swing"    "$(jq -r .swing <<<"$out")"                 "fixed"
+  check "current preset"   "$(jq -r .preset <<<"$out")"                "off"
+  check "humidity"         "$(jq -r .humidity <<<"$out")"              "61"
+  check "supported modes"  "$(jq -r '.supported.mode | join(",")' <<<"$out")" "auto,cool,dry,wind,heat"
+  # The range comes from the device, not from a constant in the panel.
+  check "setpoint min"     "$(jq -r .setpointMin <<<"$out")"           "16"
+  check "setpoint max"     "$(jq -r .setpointMax <<<"$out")"           "30"
+  teardown
+}
+
+test_mode_sends_setAirConditionerMode
+test_mode_rejects_unsupported_value
+test_fan_sends_setFanMode
+test_swing_sends_setFanOscillationMode
+test_preset_sends_setAcOptionalMode
+test_status_carries_supported_lists_and_range
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

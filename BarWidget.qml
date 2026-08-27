@@ -38,12 +38,9 @@ Item {
   // call the functions.
   function open()  { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
-  function togglePanel() {
-    if (!panelLoader.item) return
-    var willOpen = !panelLoader.item.opened
-    panelLoader.item.toggle()
-    if (willOpen) panelLoader.item.refreshAll()
-  }
+  // The panel refreshes itself on open (see its onOpenedChanged), so this only
+  // has to toggle — and the IPC path gets the same behaviour for free.
+  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
 
   // Re-injected rather than set once on load: at onLoaded the button is not
   // yet inside the bar's window, so anchorItem.QsWindow is undefined and

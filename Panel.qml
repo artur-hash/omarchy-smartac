@@ -37,9 +37,25 @@ Panel {
   // rounded to whole degrees: 16°C≈61°F, 30°C=86°F.
   readonly property string setpointUnit: (panel.host && panel.host.state && panel.host.state.unit) ? panel.host.state.unit : "C"
   readonly property bool isFahrenheit: setpointUnit === "F"
-  readonly property int minSetpoint: isFahrenheit ? 61 : 16
-  readonly property int maxSetpoint: isFahrenheit ? 86 : 30
+  // The device's own bounds when it publishes them; the unit-appropriate
+  // fallback only when it stays silent. The previous pair was a constant that
+  // happened to match this unit and would have been wrong on another.
+  readonly property var spRange: Model.setpointRange(panel.host ? panel.host.state : null)
+  readonly property int minSetpoint: panel.spRange[0]
+  readonly property int maxSetpoint: panel.spRange[1]
+
+  property bool showMore: false
+
+  // null whenever it would merely repeat the air temperature, which is every
+  // reading below the heat index's valid range. See Model.feelsLike.
+  readonly property var feels: Model.feelsLike(panel.host ? panel.host.state : null)
   readonly property string bin: host ? host.pluginDir + "bin/smartac" : ""
+
+  // Refresh belongs here, not in the bar widget's togglePanel: the panel can
+  // also be opened through Ui/Panel's own IpcHandler, which never touches the
+  // widget. Hanging it off the widget meant an IPC-opened panel showed its
+  // initial state — a stored token rendered as the setup screen.
+  onOpenedChanged: if (panel.opened) panel.refreshAll()
 
   function refreshAll() {
     if (panel.bin === "") return
@@ -51,6 +67,14 @@ Panel {
     panel.actionError = ""
     action.command = [panel.bin].concat(args)
     action.running = true
+  }
+
+  // mode / fan / swing / preset all take the same shape: one value, validated
+  // by the backend against what the device published.
+  function setEnum(kind, value) {
+    if (!panel.host || panel.host.deviceId === "") return
+    panel.busy = kind
+    panel.run([kind, value, "--device", panel.host.deviceId])
   }
 
   function setTemp(value) {
@@ -215,6 +239,65 @@ Panel {
         width: parent.width
         spacing: Style.space(12)
 
+        // The application's name, the way every other panel on this bar
+        // identifies itself. Not the device's — that changes with the picker,
+        // and a title that moves is not a title.
+        Item {
+          width: parent.width
+          height: Math.max(titleText.implicitHeight, powerBox.height)
+
+          Text {
+            id: titleText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "SmartThings AC"
+            color: panel.foreground
+            font.family: panel.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          // Filled when running, outlined when not. A switch reads as a
+          // setting; this reads as the state of the machine in the room.
+          Rectangle {
+            id: powerBox
+            visible: panel.hasToken && panel.host && panel.host.deviceId !== ""
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(30); height: Style.space(30)
+            radius: Style.cornerRadius
+            readonly property bool on: panel.host && panel.host.state.power === "on"
+            readonly property bool usable: panel.busy === "" && panel.host
+              && panel.host.state.ok && panel.host.state.online
+            color: on ? Style.selectedFillFor(panel.foreground, Color.accent) : "transparent"
+            border.width: Style.spacing.hairline
+            border.color: on ? Style.selectedBorderFor(panel.foreground, Color.accent)
+                             : Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.35)
+            opacity: usable ? 1.0 : 0.45
+
+            Text {
+              anchors.centerIn: parent
+              text: "⏻"
+              color: powerBox.on ? Style.selectedStateColor(panel.foreground, Color.accent)
+                                 : Qt.darker(panel.foreground, 1.3)
+              font.family: panel.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              enabled: powerBox.usable
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                panel.busy = "power"
+                panel.run(["power", powerBox.on ? "off" : "on", "--device", panel.host.deviceId])
+              }
+            }
+          }
+        }
+
+        PanelSeparator { width: parent.width; foreground: panel.foreground }
+
         // Backend errors live above the three state blocks, not inside the
         // controls: the screen that most needs one is the setup screen, where
         // a rejected token used to look exactly like nothing happening.
@@ -315,6 +398,57 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
+          // Each function gets its own bordered card. Before this everything sat in
+          // one flat column and read as a single undifferentiated list.
+          component Card: Rectangle {
+            default property alias body: cardCol.children
+            required property string heading
+            width: parent.width
+            height: cardCol.implicitHeight + Style.space(20)
+            radius: Style.cornerRadius + 3
+            color: Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.04)
+            border.width: Style.spacing.hairline
+            border.color: Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.13)
+
+            Column {
+              id: cardCol
+              x: Style.space(10); y: Style.space(10)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Text {
+                text: heading
+                color: Qt.darker(panel.foreground, 1.6)
+                font.family: panel.fontFamily
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1
+              }
+            }
+          }
+
+          // A row of choices built from the list the device published. A capability
+          // the device lacks publishes an empty list and the card disappears rather
+          // than offering buttons the backend would refuse.
+          component ChoiceFlow: Flow {
+            required property string kind
+            required property string current
+            required property var options
+            width: parent.width
+            spacing: Style.space(4)
+            Repeater {
+              model: options
+              Button {
+                required property var modelData
+                text: modelData
+                foreground: panel.foreground
+                fontFamily: panel.fontFamily
+                selected: modelData === current
+                enabled: panel.busy === "" && panel.host.state.online
+                onClicked: panel.setEnum(kind, modelData)
+              }
+            }
+          }
+
           Text {
             visible: panel.host && panel.host.stale
             width: parent.width
@@ -337,86 +471,122 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "POWER"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
-            }
-            ToggleSwitch {
-              anchors.verticalCenter: parent.verticalCenter
-              // Network unreachable also disables controls (spec's error
-              // table): BarWidget.qml deliberately keeps the last-good state
-              // on a failed poll, so state.ok/online alone would still read
-              // true. host.stale is what actually says the connection is
-              // down.
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.ok && panel.host.state.online
-              checked: panel.host.state.power === "on"
-              foreground: panel.foreground
-              // `checked` here still reflects the state *before* this click —
-              // ToggleSwitch only emits toggled(), it never flips its own
-              // `checked` (that is a binding to host.state, owned by the
-              // widget's poller). Sending it back as the desired state would
-              // just ask the backend to set what it already is; the actual
-              // request is always the opposite of the current power state.
-              onToggled: {
-                panel.busy = "power"
-                panel.run(["power", panel.host.state.power === "on" ? "off" : "on", "--device", panel.host.deviceId])
+          // ---- Room: never hidden behind More. These readings are live whether or
+          //      not the unit is running, and are the reason to glance at the panel.
+          Card {
+            heading: "ROOM"
+            Row {
+              width: parent.width
+              spacing: Style.space(16)
+              Text {
+                text: panel.host.state.temperature === null
+                  ? "—" : (panel.host.state.temperature + "°" + panel.host.state.unit)
+                color: panel.foreground
+                font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+              }
+              Text {
+                visible: panel.host.state.humidity !== null
+                anchors.verticalCenter: parent.verticalCenter
+                text: panel.host.state.humidity + "%"
+                color: Qt.darker(panel.foreground, 1.35)
+                font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                // Only when it actually differs from the air temperature — see
+                // Model.feelsLike. Below ~27C the heat index equals it by definition.
+                visible: panel.feels !== null
+                anchors.verticalCenter: parent.verticalCenter
+                text: "feels " + panel.feels + "°"
+                color: Qt.darker(panel.foreground, 1.35)
+                font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
               }
             }
           }
 
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "TARGET"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
-            }
-            PanelActionButton {
-              iconText: "-"; tooltipText: "Cooler"
-              foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
-              onClicked: panel.setTemp(panel.host.state.setpoint - 1)
-            }
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.setpoint === null ? "—" : (panel.host.state.setpoint + "°" + panel.setpointUnit)
-              color: panel.foreground
-              font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
-            }
-            PanelActionButton {
-              iconText: "+"; tooltipText: "Warmer"
-              foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
-              onClicked: panel.setTemp(panel.host.state.setpoint + 1)
+          Card {
+            heading: "TEMPERATURE"
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(12)
+              PanelActionButton {
+                iconText: "-"; tooltipText: "Cooler"
+                foreground: panel.foreground; fontFamily: panel.fontFamily
+                enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
+                onClicked: panel.setTemp(panel.host.state.setpoint - 1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: panel.host.state.setpoint === null
+                  ? "—" : (panel.host.state.setpoint + "°" + panel.host.state.unit)
+                color: panel.foreground
+                font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+              }
+              PanelActionButton {
+                iconText: "+"; tooltipText: "Warmer"
+                foreground: panel.foreground; fontFamily: panel.fontFamily
+                enabled: panel.busy === "" && panel.host.state.setpoint !== null && panel.host.state.online
+                onClicked: panel.setTemp(panel.host.state.setpoint + 1)
+              }
             }
           }
 
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "ROOM"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
+          Card {
+            heading: "MODE"
+            visible: panel.host.state.supported.mode.length > 0
+            ChoiceFlow {
+              kind: "mode"
+              current: panel.host.state.mode || ""
+              options: panel.host.state.supported.mode
             }
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.temperature === null ? "—" : (panel.host.state.temperature + "°" + panel.setpointUnit)
-              color: panel.foreground
-              font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
+          }
+
+          Card {
+            heading: "FAN"
+            visible: panel.host.state.supported.fan.length > 0
+            ChoiceFlow {
+              kind: "fan"
+              current: panel.host.state.fan || ""
+              options: panel.host.state.supported.fan
+            }
+          }
+
+          // Its own centred row between the essentials and the rest, rather than one
+          // more button in the stack where it read as just another control.
+          Item {
+            width: parent.width
+            height: moreButton.implicitHeight + Style.space(4)
+            Button {
+              id: moreButton
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: panel.showMore ? "Less  ▴" : "More  ▾"
+              foreground: panel.foreground
+              fontFamily: panel.fontFamily
+              onClicked: panel.showMore = !panel.showMore
+            }
+          }
+
+          Card {
+            heading: "SWING"
+            visible: panel.showMore && panel.host.state.supported.swing.length > 0
+            ChoiceFlow {
+              kind: "swing"
+              current: panel.host.state.swing || ""
+              options: panel.host.state.supported.swing
+            }
+          }
+
+          Card {
+            heading: "PRESET"
+            visible: panel.showMore && panel.host.state.supported.preset.length > 0
+            ChoiceFlow {
+              kind: "preset"
+              current: panel.host.state.preset || ""
+              options: panel.host.state.supported.preset
             }
           }
 
           Button {
+            visible: panel.showMore
             text: "Change device"
             foreground: panel.foreground
             fontFamily: panel.fontFamily
