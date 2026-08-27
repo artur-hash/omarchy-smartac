@@ -73,16 +73,32 @@ Panel {
   // reading below the heat index's valid range. See Model.feelsLike.
   readonly property var feels: Model.feelsLike(panel.host ? panel.host.state : null)
 
-  readonly property var shownSetpoint: (panel.pending && panel.pending.kind === "temp")
-    ? parseInt(panel.pending.value)
-    : (panel.host ? panel.host.state.setpoint : null)
+  // The setpoint the user is dialling, before anything has been sent. Stepping
+  // is local and instant; the write waits until they stop. Sending one command
+  // per press and disabling the buttons until it answered meant crossing four
+  // degrees took four round trips.
+  property var dialSetpoint: null
+
+  readonly property var shownSetpoint: panel.dialSetpoint !== null
+    ? panel.dialSetpoint
+    : ((panel.pending && panel.pending.kind === "temp")
+        ? parseInt(panel.pending.value)
+        : (panel.host ? panel.host.state.setpoint : null))
+
+  function stepTemp(delta) {
+    var base = panel.dialSetpoint !== null ? panel.dialSetpoint : panel.shownSetpoint
+    if (base === null) return
+    panel.actionError = ""
+    panel.dialSetpoint = Model.clampSetpoint(base + delta, panel.minSetpoint, panel.maxSetpoint)
+    setpointSend.restart()
+  }
   readonly property string bin: host ? host.pluginDir + "bin/smartac" : ""
 
   // Refresh belongs here, not in the bar widget's togglePanel: the panel can
   // also be opened through Ui/Panel's own IpcHandler, which never touches the
   // widget. Hanging it off the widget meant an IPC-opened panel showed its
   // initial state — a stored token rendered as the setup screen.
-  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.refreshAll() }
+  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.dialSetpoint = null; panel.refreshAll() }
 
   function refreshAll() {
     if (panel.bin === "") return
@@ -212,6 +228,23 @@ Panel {
   // took eight, so a single read at six seconds would have called a working
   // preset broken. Two reads cost an extra pair of requests only when something
   // really did not apply.
+  // Long enough to cross a range without a write per degree, short enough that
+  // letting go feels like it took.
+  Timer {
+    id: setpointSend
+    interval: 600
+    repeat: false
+    onTriggered: {
+      if (panel.dialSetpoint === null) return
+      // A write is still on the wire; the last value dialled is the one that
+      // should win, so wait rather than send a value about to be superseded.
+      if (action.running) { setpointSend.restart(); return }
+      var v = panel.dialSetpoint
+      panel.dialSetpoint = null
+      panel.setTemp(v)
+    }
+  }
+
   Timer {
     id: verifyTimer
     interval: 8000
@@ -644,22 +677,25 @@ Panel {
               PanelActionButton {
                 iconText: "-"; tooltipText: "Cooler"
                 foreground: panel.foreground; fontFamily: panel.fontFamily
-                enabled: panel.busy === "" && panel.shownSetpoint !== null && panel.host.state.online
-                onClicked: panel.setTemp(panel.shownSetpoint - 1)
+                enabled: panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.stepTemp(-1)
               }
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: panel.shownSetpoint === null
                   ? "—" : (panel.shownSetpoint + "°" + panel.host.state.unit)
-                opacity: (panel.pending && panel.pending.kind === "temp") ? 0.5 : 1.0
+                // Crisp while it is the user's own number, dimmed only once it
+                // has been sent and is waiting on the device to agree.
+                opacity: (panel.dialSetpoint === null && panel.pending
+                          && panel.pending.kind === "temp") ? 0.5 : 1.0
                 color: panel.foreground
                 font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
               }
               PanelActionButton {
                 iconText: "+"; tooltipText: "Warmer"
                 foreground: panel.foreground; fontFamily: panel.fontFamily
-                enabled: panel.busy === "" && panel.shownSetpoint !== null && panel.host.state.online
-                onClicked: panel.setTemp(panel.shownSetpoint + 1)
+                enabled: panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.stepTemp(1)
               }
             }
           }
