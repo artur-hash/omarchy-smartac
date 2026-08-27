@@ -423,5 +423,187 @@ test_doctor_redacts_the_token
 test_doctor_capabilities_lists_raw_ids
 test_doctor_capabilities_errors_on_unknown_device
 
+# ---- full AC scope: mode / fan / swing / preset ----
+
+# Each of these is validated against the list the device itself publishes, not
+# against a list hardcoded here — a device that drops "turbo" should reject it
+# without a code change.
+test_mode_sends_setAirConditionerMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"airConditionerMode"' <<<"$args" && ok "mode capability" || bad "mode capability" "$args"
+  grep -q '"command":"setAirConditionerMode"'  <<<"$args" && ok "mode command"    || bad "mode command" "$args"
+  grep -q '"arguments":\["cool"\]'            <<<"$args" && ok "mode argument"   || bad "mode argument" "$args"
+  teardown
+}
+
+test_mode_rejects_unsupported_value() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" mode banana --device ac-1 2>&1); rc=$?
+  check "an unsupported mode exits 2" "$rc" "2"
+  grep -q "supported" <<<"$out" && ok "the refusal names what is supported" || bad "refusal" "$out"
+  teardown
+}
+
+test_fan_sends_setFanMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" fan turbo --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"airConditionerFanMode"' <<<"$args" && ok "fan capability" || bad "fan capability" "$args"
+  grep -q '"command":"setFanMode"'                <<<"$args" && ok "fan command"   || bad "fan command" "$args"
+  teardown
+}
+
+test_swing_sends_setFanOscillationMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" swing all --device ac-1 >/dev/null
+  grep -q '"command":"setFanOscillationMode"' "$TMP/curl.args" && ok "swing command" || bad "swing command" "$(cat "$TMP/curl.args")"
+  teardown
+}
+
+test_preset_sends_setAcOptionalMode() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" preset windFree --device ac-1 >/dev/null
+  args=$(cat "$TMP/curl.args")
+  grep -q '"capability":"custom.airConditionerOptionalMode"' <<<"$args" && ok "preset capability" || bad "preset capability" "$args"
+  grep -q '"command":"setAcOptionalMode"' <<<"$args" && ok "preset command" || bad "preset command" "$args"
+  teardown
+}
+
+test_status_carries_supported_lists_and_range() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status-full.json" <(echo '{"state":"ONLINE"}') >"$TMP/both.json"
+  fake_curl 200 "$TMP/both.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1)
+  check "current mode"     "$(jq -r .mode <<<"$out")"                  "heat"
+  check "current fan"      "$(jq -r .fan <<<"$out")"                   "low"
+  check "current swing"    "$(jq -r .swing <<<"$out")"                 "fixed"
+  check "current preset"   "$(jq -r .preset <<<"$out")"                "off"
+  check "humidity"         "$(jq -r .humidity <<<"$out")"              "61"
+  check "supported modes"  "$(jq -r '.supported.mode | join(",")' <<<"$out")" "auto,cool,dry,wind,heat"
+  # The range comes from the device, not from a constant in the panel.
+  check "setpoint min"     "$(jq -r .setpointMin <<<"$out")"           "16"
+  check "setpoint max"     "$(jq -r .setpointMax <<<"$out")"           "30"
+  teardown
+}
+
+# The API answers 200 for a command it refuses and puts the verdict in
+# results[].status. Reporting ok on that told the panel a command landed when
+# the cloud had already said it did not.
+test_refused_command_is_not_reported_as_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{"results":[{"id":"x","status":"FAILED"}]}' > "$TMP/refused.json"
+  fake_curl 200 "$TMP/refused.json"
+  out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
+  check "a FAILED verdict exits 8" "$rc" "8"
+  grep -q 'FAILED' <<<"$out" && ok "the error names the verdict" || bad "the error names the verdict" "$out"
+  teardown
+}
+
+test_completed_command_is_reported_as_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{"results":[{"id":"x","status":"COMPLETED"}]}' > "$TMP/done.json"
+  fake_curl 200 "$TMP/done.json"
+  out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
+  check "a COMPLETED verdict exits 0" "$rc" "0"
+  check "and prints ok" "$out" '{"ok":true}'
+  teardown
+}
+
+# A response with no results array still counts as success: some deployments
+# omit it, and inventing a failure is worse than trusting the 2xx.
+test_missing_results_array_is_still_success() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  printf '{}' > "$TMP/bare.json"
+  fake_curl 200 "$TMP/bare.json"
+  rc=0; "$ROOT/bin/smartac" power on --device ac-1 >/dev/null 2>&1 || rc=$?
+  check "an absent results array exits 0" "$rc" "0"
+  teardown
+}
+
+# The panel builds its buttons from the device's own supported list, so the
+# validating GET re-fetches what is already on screen. Requests are the scarce
+# resource: this token hit SmartThings' rate limit during development at
+# roughly sixteen requests in nine seconds.
+test_no_validate_skips_the_lookup_request() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 --no-validate >/dev/null 2>&1
+  gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
+  check "--no-validate makes no GET" "$gets" "0"
+  grep -q '"command":"setAirConditionerMode"' "$TMP/curl.args" \
+    && ok "--no-validate still sends the command" || bad "--no-validate still sends the command" "$(cat "$TMP/curl.args")"
+  teardown
+}
+
+# Without the flag the lookup stays, so a CLI user still gets told what the
+# device accepts instead of a bare refusal.
+test_validation_still_runs_by_default() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null 2>&1
+  gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
+  check "the default path still looks up supported values" "$gets" "1"
+  teardown
+}
+
+# The confirmation read after a write does not need reachability -- the panel
+# already knows it -- and halving the requests is what lets that read run at
+# three seconds instead of eight.
+test_quick_status_skips_the_health_call() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" status --json --quick --device ac-1 2>&1)
+  health=$(grep -c '/health' "$TMP/curl.args" || true)
+  check "--quick makes no health call" "$health" "0"
+  check "--quick reports online as unknown" "$(jq -r .online <<<"$out")" "null"
+  check "--quick still reports the mode" "$(jq -r .mode <<<"$out")" "heat"
+  teardown
+}
+
+test_full_status_still_checks_health() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1 2>&1)
+  health=$(grep -c '/health' "$TMP/curl.args" || true)
+  check "the default status still asks health" "$health" "1"
+  check "and reports a real online value" "$(jq -r .online <<<"$out")" "true"
+  teardown
+}
+
+test_mode_sends_setAirConditionerMode
+test_mode_rejects_unsupported_value
+test_fan_sends_setFanMode
+test_swing_sends_setFanOscillationMode
+test_preset_sends_setAcOptionalMode
+test_status_carries_supported_lists_and_range
+test_refused_command_is_not_reported_as_success
+test_completed_command_is_reported_as_success
+test_missing_results_array_is_still_success
+test_no_validate_skips_the_lookup_request
+test_validation_still_runs_by_default
+test_quick_status_skips_the_health_call
+test_full_status_still_checks_health
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

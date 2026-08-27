@@ -104,11 +104,16 @@ cmd_devices() {
 require_device() { [[ -n ${1:-} ]] || die "pass --device <id>" 2; }
 
 cmd_status() {
-  local device=""
+  local device="" quick=0
   while (( $# )); do
     case "$1" in
       --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
       --json)   shift ;;
+      # Skips the reachability call and reports online as null -- unknown, not
+      # false. The panel uses this when confirming a write it just sent: it
+      # already knows whether the device is reachable, and halving the requests
+      # is what lets the confirmation run at three seconds instead of eight.
+      --quick)  quick=1; shift ;;
       *)        die "unknown argument: $1" 2 ;;
     esac
   done
@@ -117,10 +122,12 @@ cmd_status() {
   # Two calls. /status answers with the last values it saw and says nothing
   # about reachability, so an unplugged AC returns yesterday's numbers and
   # looks healthy. /health is the only thing that tells the two apart.
-  local health online
-  health=$(api GET "/devices/$device/health") || exit $?
-  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
-  [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
+  local health online="null"
+  if (( ! quick )); then
+    health=$(api GET "/devices/$device/health") || exit $?
+    online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
+    [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
+  fi
 
   api GET "/devices/$device/status" | jq --argjson online "$online" '
     .components.main as $m | {
@@ -128,18 +135,50 @@ cmd_status() {
       temperature: ($m.temperatureMeasurement.temperature.value // null),
       setpoint:    ($m.thermostatCoolingSetpoint.coolingSetpoint.value // null),
       unit:        ($m.temperatureMeasurement.temperature.unit // "C"),
-      online:      $online
+      online:      $online,
+
+      mode:    ($m.airConditionerMode.airConditionerMode.value // null),
+      fan:     ($m.airConditionerFanMode.fanMode.value // null),
+      swing:   ($m.fanOscillationMode.fanOscillationMode.value // null),
+      preset:  ($m["custom.airConditionerOptionalMode"].acOptionalMode.value // null),
+      humidity: ($m.relativeHumidityMeasurement.humidity.value // null),
+
+      # The lists the device itself publishes. The panel builds its pills from
+      # these rather than from a hardcoded set, so a firmware update that drops
+      # a mode removes its button without a code change.
+      supported: {
+        mode:   ($m.airConditionerMode.supportedAcModes.value // []),
+        fan:    ($m.airConditionerFanMode.supportedAcFanModes.value // []),
+        swing:  ($m.fanOscillationMode.supportedFanOscillationModes.value // []),
+        preset: ($m["custom.airConditionerOptionalMode"].supportedAcOptionalMode.value // [])
+      },
+
+      # Read from the device, not assumed. The old hardcoded 16-30 happened to
+      # match this unit; on another one it would have been wrong.
+      setpointMin: ($m["custom.thermostatSetpointControl"].minimumSetpoint.value // null),
+      setpointMax: ($m["custom.thermostatSetpointControl"].maximumSetpoint.value // null)
     }'
 }
 
 # ---------------------------------------------------------------- commands --
 
 send_command() {
-  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body
+  local device="$1" capability="$2" command="$3" args_json="${4:-[]}" body verdict
   body=$(jq -cn --arg c "$capability" --arg k "$command" --argjson a "$args_json" \
     '{commands:[{component:"main", capability:$c, command:$k, arguments:$a}]}')
-  api POST "/devices/$device/commands" "$body" >/dev/null
-  printf '{"ok":true}\n'
+  # A refused command is not an HTTP error: the API answers 200 and puts the
+  # verdict in results[].status. Printing ok without reading it would report a
+  # success the cloud never claimed. An absent results array is treated as
+  # success -- some deployments omit it, and inventing a failure is worse than
+  # trusting the 2xx.
+  verdict=$(api POST "/devices/$device/commands" "$body" | jq -r '
+    if (.results | type) == "array" and (.results | length) > 0
+    then ([.results[].status] | map(select(. != "COMPLETED" and . != "ACCEPTED")) | .[0] // "COMPLETED")
+    else "COMPLETED" end' 2>/dev/null)
+  case "$verdict" in
+    COMPLETED|ACCEPTED|"") printf '{"ok":true}\n' ;;
+    *) die "SmartThings refused the command ($verdict)" 8 ;;
+  esac
 }
 
 cmd_power() {
@@ -154,6 +193,50 @@ cmd_power() {
   done
   require_device "$device"
   send_command "$device" switch "$state"
+}
+
+# Validates against what the device publishes as supported, then sends. That
+# costs one extra GET per write, which is the price of not shipping a hardcoded
+# list that silently diverges from the hardware -- but only for a caller that
+# does not already hold the list. The panel builds its buttons from the very
+# same supported arrays, so it cannot offer an unsupported value, and it passes
+# --no-validate to skip the round trip. Its safety net is send_command, which
+# now surfaces a refusal the API reports.
+send_enum_command() {
+  local device="$1" value="$2" capability="$3" command="$4" jqpath="$5" label="$6" validate="${7:-1}"
+  local supported
+  if [[ $validate != 1 ]]; then
+    send_command "$device" "$capability" "$command" "$(jq -cn --arg v "$value" '[$v]')"
+    return
+  fi
+  supported=$(api GET "/devices/$device/status" \
+    | jq -r --arg p "$jqpath" '.components.main[$p] // {} | to_entries[]
+        | select(.key | startswith("supported")) | .value.value // [] | .[]' 2>/dev/null | sort -u)
+  [[ -n $supported ]] || die "the device published no supported $label values" 9
+  grep -qxF -- "$value" <<<"$supported" \
+    || die "$label '$value' is not supported by this device; supported: $(tr '\n' ' ' <<<"$supported" | sed 's/ $//')" 2
+  send_command "$device" "$capability" "$command" "$(jq -cn --arg v "$value" '[$v]')"
+}
+
+cmd_enum() {
+  local kind="$1"; shift
+  local value="${1:-}"; shift || true
+  [[ -n $value ]] || die "usage: smartac $kind <value> --device <id>" 2
+  local device="" validate=1
+  while (( $# )); do
+    case "$1" in
+      --device)      [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
+      --no-validate) validate=0; shift ;;
+      *) die "unknown argument: $1" 2 ;;
+    esac
+  done
+  require_device "$device"
+  case "$kind" in
+    mode)   send_enum_command "$device" "$value" airConditionerMode setAirConditionerMode airConditionerMode mode "$validate" ;;
+    fan)    send_enum_command "$device" "$value" airConditionerFanMode setFanMode airConditionerFanMode fan "$validate" ;;
+    swing)  send_enum_command "$device" "$value" fanOscillationMode setFanOscillationMode fanOscillationMode swing "$validate" ;;
+    preset) send_enum_command "$device" "$value" custom.airConditionerOptionalMode setAcOptionalMode custom.airConditionerOptionalMode preset "$validate" ;;
+  esac
 }
 
 cmd_temp() {
@@ -224,6 +307,7 @@ case "${1:-}" in
   status)  shift; cmd_status "$@" ;;
   power)   shift; cmd_power "$@" ;;
   temp)    shift; cmd_temp "$@" ;;
+  mode|fan|swing|preset) k="$1"; shift; cmd_enum "$k" "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
 esac

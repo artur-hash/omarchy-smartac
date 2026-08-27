@@ -37,9 +37,68 @@ Panel {
   // rounded to whole degrees: 16°C≈61°F, 30°C=86°F.
   readonly property string setpointUnit: (panel.host && panel.host.state && panel.host.state.unit) ? panel.host.state.unit : "C"
   readonly property bool isFahrenheit: setpointUnit === "F"
-  readonly property int minSetpoint: isFahrenheit ? 61 : 16
-  readonly property int maxSetpoint: isFahrenheit ? 86 : 30
+  // The device's own bounds when it publishes them; the unit-appropriate
+  // fallback only when it stays silent. The previous pair was a constant that
+  // happened to match this unit and would have been wrong on another.
+  readonly property var spRange: Model.setpointRange(panel.host ? panel.host.state : null)
+  readonly property int minSetpoint: panel.spRange[0]
+  readonly property int maxSetpoint: panel.spRange[1]
+
+  property bool showMore: false
+
+  // What the last write asked for, held until a later read either confirms it
+  // or shows the device dropped it. This hardware silently ignores a command
+  // that does not apply to its current state -- WindFree outside cool mode, a
+  // setpoint while the unit is off -- and answers COMPLETED all the same, so
+  // the only honest confirmation is reading the state back.
+  property var pending: null        // { kind, value, label }
+  property int verifyAttempts: 0
+
+  // Gaps between confirmation reads, so the checks land at roughly 3, 5, 7 and
+  // 11 seconds after the write. Measured on the hardware: a preset and a mode
+  // change were both absent from the cloud at 1.4s and present by 3.0-3.2s, so
+  // the first check usually settles it and the rest exist for a slow day. The
+  // old single check at 8s was three times longer than anything needed.
+  readonly property var verifyDelays: [3000, 1800, 2500, 4000]
+
+  // A control the last write asked for but nothing has confirmed yet. It is
+  // drawn selected so the click registers, and dimmed so the panel never claims
+  // a state it has not read back -- the difference between "asked" and "done".
+  function isPending(kind, value) {
+    return panel.pending !== null && panel.pending.kind === kind
+      && panel.pending.value === String(value)
+  }
+
+  // null whenever it would merely repeat the air temperature, which is every
+  // reading below the heat index's valid range. See Model.feelsLike.
+  readonly property var feels: Model.feelsLike(panel.host ? panel.host.state : null)
+
+  // The setpoint the user is dialling, before anything has been sent. Stepping
+  // is local and instant; the write waits until they stop. Sending one command
+  // per press and disabling the buttons until it answered meant crossing four
+  // degrees took four round trips.
+  property var dialSetpoint: null
+
+  readonly property var shownSetpoint: panel.dialSetpoint !== null
+    ? panel.dialSetpoint
+    : ((panel.pending && panel.pending.kind === "temp")
+        ? parseInt(panel.pending.value)
+        : (panel.host ? panel.host.state.setpoint : null))
+
+  function stepTemp(delta) {
+    var base = panel.dialSetpoint !== null ? panel.dialSetpoint : panel.shownSetpoint
+    if (base === null) return
+    panel.actionError = ""
+    panel.dialSetpoint = Model.clampSetpoint(base + delta, panel.minSetpoint, panel.maxSetpoint)
+    setpointSend.restart()
+  }
   readonly property string bin: host ? host.pluginDir + "bin/smartac" : ""
+
+  // Refresh belongs here, not in the bar widget's togglePanel: the panel can
+  // also be opened through Ui/Panel's own IpcHandler, which never touches the
+  // widget. Hanging it off the widget meant an IPC-opened panel showed its
+  // initial state — a stored token rendered as the setup screen.
+  onOpenedChanged: if (panel.opened) { panel.pending = null; panel.dialSetpoint = null; panel.refreshAll() }
 
   function refreshAll() {
     if (panel.bin === "") return
@@ -53,9 +112,22 @@ Panel {
     action.running = true
   }
 
+  // mode / fan / swing / preset all take the same shape: one value, validated
+  // by the backend against what the device published.
+  function setEnum(kind, value) {
+    if (!panel.host || panel.host.deviceId === "") return
+    panel.busy = kind
+    panel.pending = { kind: kind, value: String(value), label: kind }
+    // --no-validate: these buttons are built from the device's own supported
+    // list, so the backend's validating GET would re-fetch what is already on
+    // screen. Requests are the scarce resource here, not correctness.
+    panel.run([kind, value, "--device", panel.host.deviceId, "--no-validate"])
+  }
+
   function setTemp(value) {
     var v = Model.clampSetpoint(value, panel.minSetpoint, panel.maxSetpoint)
     panel.busy = "temp"
+    panel.pending = { kind: "temp", value: String(v), label: "temperature" }
     panel.run(["temp", String(v), "--device", panel.host.deviceId])
   }
 
@@ -116,10 +188,119 @@ Panel {
         var msg = ""
         try { msg = JSON.parse(String(actionErr.text || "")).error || "" } catch (e) {}
         panel.actionError = msg !== "" ? msg : "Command failed."
+        panel.pending = null
+        panel.refreshAll()
+        return
       }
-      panel.refreshAll()
+      // The cloud accepting a command is not the device applying it, and the
+      // reported state lags the write. Reading now returns the old value and
+      // looks like a failure, so the read waits.
+      panel.verifyAttempts = 0
+      verifyTimer.interval = panel.verifyDelays[0]
+      verifyTimer.restart()
     }
   }
+
+  // Verification reads through its own process rather than host.refresh(),
+  // which begins `if (reader.running) return` -- a poll already in flight made
+  // the verification a silent no-op, and because nothing then changed state,
+  // the pending write was never settled: the button kept showing the requested
+  // value forever and the failure message never came.
+  Process {
+    id: verifier
+    stdout: StdioCollector { id: verifyOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var st = Model.parseStatus(verifyOut.text)
+      if (st.ok && panel.host) {
+        // A quick read skips the reachability call, so it has nothing to say
+        // about it. Carrying the last known value forward beats letting the
+        // parser's default turn every confirmation into "device offline".
+        st.online = panel.host.state.online
+        // The panel paid for this read; the bar should not pay for it again.
+        panel.host.state = st
+      }
+      panel.settlePending(st)
+    }
+  }
+
+  // One read, a beat after the write. Measured against the hardware: a mode
+  // change surfaced four to six seconds after the command returned and a preset
+  // took eight, so a single read at six seconds would have called a working
+  // preset broken. Two reads cost an extra pair of requests only when something
+  // really did not apply.
+  // Long enough to cross a range without a write per degree, short enough that
+  // letting go feels like it took.
+  Timer {
+    id: setpointSend
+    interval: 600
+    repeat: false
+    onTriggered: {
+      if (panel.dialSetpoint === null) return
+      // A write is still on the wire; the last value dialled is the one that
+      // should win, so wait rather than send a value about to be superseded.
+      if (action.running) { setpointSend.restart(); return }
+      var v = panel.dialSetpoint
+      panel.dialSetpoint = null
+      panel.setTemp(v)
+    }
+  }
+
+  Timer {
+    id: verifyTimer
+    interval: 8000
+    repeat: false
+    onTriggered: {
+      if (!panel.host || panel.host.deviceId === "") return
+      // Come back rather than give up: dropping this tick would strand the
+      // pending write with nothing left to settle it.
+      if (verifier.running) { verifyTimer.interval = 1000; verifyTimer.restart(); return }
+      if (panel.pending) panel.verifyAttempts = panel.verifyAttempts + 1
+      verifier.command = [panel.bin, "status", "--json", "--quick", "--device", panel.host.deviceId]
+      verifier.running = true
+    }
+  }
+
+  function settlePending(st) {
+    if (!panel.pending) return
+    var want = panel.pending
+    // A read that failed -- rate limited, network down -- says nothing about
+    // whether the write landed. Try again if there are tries left rather than
+    // quietly dropping the request on the floor.
+    if (!st || !st.ok) {
+      if (panel.verifyAttempts < panel.verifyDelays.length) {
+        verifyTimer.interval = panel.verifyDelays[panel.verifyAttempts]
+        verifyTimer.restart()
+      } else {
+        panel.pending = null
+      }
+      return
+    }
+
+    var got = want.kind === "temp" ? String(st.setpoint) : String(st[want.kind] || "")
+    if (got === want.value) {
+      panel.pending = null
+      // One more read shortly after. Settings cascade on this hardware -- a mode
+      // change drops the preset and each mode carries its own setpoint -- and
+      // the confirming read is often too early to have seen the rest move.
+      verifyTimer.interval = 4000
+      verifyTimer.restart()
+      return
+    }
+
+    // Escalating gaps rather than one long wait, so a slow answer costs time
+    // only when it is actually slow.
+    if (panel.verifyAttempts < panel.verifyDelays.length) {
+      verifyTimer.interval = panel.verifyDelays[panel.verifyAttempts]
+      verifyTimer.restart()
+      return
+    }
+
+    panel.pending = null
+    panel.actionError = "The device did not apply " + want.label + " " + want.value
+      + ". It is still " + (got === "" || got === "null" ? "unchanged" : got)
+      + " — this unit ignores settings that do not apply to its current state."
+  }
+
 
   // The token goes in on stdin. As an argument it would land in
   // /proc/<pid>/cmdline, readable by every process on this session — the same
@@ -214,6 +395,70 @@ Panel {
         id: column
         width: parent.width
         spacing: Style.space(12)
+
+        // The application's name, the way every other panel on this bar
+        // identifies itself. Not the device's — that changes with the picker,
+        // and a title that moves is not a title.
+        Item {
+          width: parent.width
+          height: Math.max(titleText.implicitHeight, powerBox.height)
+
+          Text {
+            id: titleText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "SmartThings AC"
+            color: panel.foreground
+            font.family: panel.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          // Filled when running, outlined when not. A switch reads as a
+          // setting; this reads as the state of the machine in the room.
+          Rectangle {
+            id: powerBox
+            visible: panel.hasToken && panel.host && panel.host.deviceId !== ""
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(30); height: Style.space(30)
+            radius: Style.cornerRadius
+            readonly property bool waiting: panel.pending !== null && panel.pending.kind === "power"
+            readonly property bool on: powerBox.waiting
+              ? panel.pending.value === "on"
+              : (panel.host && panel.host.state.power === "on")
+            readonly property bool usable: panel.busy === "" && panel.host
+              && panel.host.state.ok && panel.host.state.online
+            color: on ? Style.selectedFillFor(panel.foreground, Color.accent) : "transparent"
+            border.width: Style.spacing.hairline
+            border.color: on ? Style.selectedBorderFor(panel.foreground, Color.accent)
+                             : Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.35)
+            opacity: !usable ? 0.45 : (powerBox.waiting ? 0.5 : 1.0)
+
+            Text {
+              anchors.centerIn: parent
+              text: "⏻"
+              color: powerBox.on ? Style.selectedStateColor(panel.foreground, Color.accent)
+                                 : Qt.darker(panel.foreground, 1.3)
+              font.family: panel.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              enabled: powerBox.usable
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                var want = powerBox.on ? "off" : "on"
+                panel.busy = "power"
+                panel.pending = { kind: "power", value: want, label: "power" }
+                panel.run(["power", want, "--device", panel.host.deviceId])
+              }
+            }
+          }
+        }
+
+        PanelSeparator { width: parent.width; foreground: panel.foreground }
 
         // Backend errors live above the three state blocks, not inside the
         // controls: the screen that most needs one is the setup screen, where
@@ -315,6 +560,61 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
+          // Each function gets its own bordered card. Before this everything sat in
+          // one flat column and read as a single undifferentiated list.
+          component Card: Rectangle {
+            default property alias body: cardCol.children
+            required property string heading
+            width: parent.width
+            height: cardCol.implicitHeight + Style.space(20)
+            radius: Style.cornerRadius + 3
+            color: Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.04)
+            border.width: Style.spacing.hairline
+            border.color: Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.13)
+
+            Column {
+              id: cardCol
+              x: Style.space(10); y: Style.space(10)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Text {
+                text: heading
+                color: Qt.darker(panel.foreground, 1.6)
+                font.family: panel.fontFamily
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1
+              }
+            }
+          }
+
+          // A row of choices built from the list the device published. A capability
+          // the device lacks publishes an empty list and the card disappears rather
+          // than offering buttons the backend would refuse.
+          component ChoiceFlow: Flow {
+            required property string kind
+            required property string current
+            required property var options
+            width: parent.width
+            spacing: Style.space(4)
+            Repeater {
+              model: options
+              Button {
+                required property var modelData
+                text: modelData
+                foreground: panel.foreground
+                fontFamily: panel.fontFamily
+                selected: modelData === current || panel.isPending(kind, modelData)
+                // Half strength until a read confirms it. The old build painted
+                // a requested value exactly like a confirmed one, so a command
+                // the device dropped looked like one it had honoured.
+                opacity: panel.isPending(kind, modelData) ? 0.5 : 1.0
+                enabled: panel.busy === "" && panel.host.state.online
+                onClicked: panel.setEnum(kind, modelData)
+              }
+            }
+          }
+
           Text {
             visible: panel.host && panel.host.stale
             width: parent.width
@@ -337,86 +637,126 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "POWER"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
-            }
-            ToggleSwitch {
-              anchors.verticalCenter: parent.verticalCenter
-              // Network unreachable also disables controls (spec's error
-              // table): BarWidget.qml deliberately keeps the last-good state
-              // on a failed poll, so state.ok/online alone would still read
-              // true. host.stale is what actually says the connection is
-              // down.
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.ok && panel.host.state.online
-              checked: panel.host.state.power === "on"
-              foreground: panel.foreground
-              // `checked` here still reflects the state *before* this click —
-              // ToggleSwitch only emits toggled(), it never flips its own
-              // `checked` (that is a binding to host.state, owned by the
-              // widget's poller). Sending it back as the desired state would
-              // just ask the backend to set what it already is; the actual
-              // request is always the opposite of the current power state.
-              onToggled: {
-                panel.busy = "power"
-                panel.run(["power", panel.host.state.power === "on" ? "off" : "on", "--device", panel.host.deviceId])
+          // ---- Room: never hidden behind More. These readings are live whether or
+          //      not the unit is running, and are the reason to glance at the panel.
+          Card {
+            heading: "ROOM"
+            Row {
+              width: parent.width
+              spacing: Style.space(16)
+              Text {
+                text: panel.host.state.temperature === null
+                  ? "—" : (panel.host.state.temperature + "°" + panel.host.state.unit)
+                color: panel.foreground
+                font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+              }
+              Text {
+                visible: panel.host.state.humidity !== null
+                anchors.verticalCenter: parent.verticalCenter
+                text: panel.host.state.humidity + "%"
+                color: Qt.darker(panel.foreground, 1.35)
+                font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                // Only when it actually differs from the air temperature — see
+                // Model.feelsLike. Below ~27C the heat index equals it by definition.
+                visible: panel.feels !== null
+                anchors.verticalCenter: parent.verticalCenter
+                text: "feels " + panel.feels + "°"
+                color: Qt.darker(panel.foreground, 1.35)
+                font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
               }
             }
           }
 
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "TARGET"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
-            }
-            PanelActionButton {
-              iconText: "-"; tooltipText: "Cooler"
-              foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
-              onClicked: panel.setTemp(panel.host.state.setpoint - 1)
-            }
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.setpoint === null ? "—" : (panel.host.state.setpoint + "°" + panel.setpointUnit)
-              color: panel.foreground
-              font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
-            }
-            PanelActionButton {
-              iconText: "+"; tooltipText: "Warmer"
-              foreground: panel.foreground; fontFamily: panel.fontFamily
-              enabled: panel.busy === "" && !panel.host.stale && panel.host.state.setpoint !== null && panel.host.state.online
-              onClicked: panel.setTemp(panel.host.state.setpoint + 1)
+          Card {
+            heading: "TEMPERATURE"
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(12)
+              PanelActionButton {
+                iconText: "-"; tooltipText: "Cooler"
+                foreground: panel.foreground; fontFamily: panel.fontFamily
+                enabled: panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.stepTemp(-1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: panel.shownSetpoint === null
+                  ? "—" : (panel.shownSetpoint + "°" + panel.host.state.unit)
+                // Crisp while it is the user's own number, dimmed only once it
+                // has been sent and is waiting on the device to agree.
+                opacity: (panel.dialSetpoint === null && panel.pending
+                          && panel.pending.kind === "temp") ? 0.5 : 1.0
+                color: panel.foreground
+                font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+              }
+              PanelActionButton {
+                iconText: "+"; tooltipText: "Warmer"
+                foreground: panel.foreground; fontFamily: panel.fontFamily
+                enabled: panel.shownSetpoint !== null && panel.host.state.online
+                onClicked: panel.stepTemp(1)
+              }
             }
           }
 
-          Row {
-            width: parent.width
-            spacing: Style.space(10)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(80); text: "ROOM"
-              color: Qt.darker(panel.foreground, 1.6)
-              font.family: panel.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 1
+          Card {
+            heading: "MODE"
+            visible: panel.host.state.supported.mode.length > 0
+            ChoiceFlow {
+              kind: "mode"
+              current: panel.host.state.mode || ""
+              options: panel.host.state.supported.mode
             }
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: panel.host.state.temperature === null ? "—" : (panel.host.state.temperature + "°" + panel.setpointUnit)
-              color: panel.foreground
-              font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
+          }
+
+          Card {
+            heading: "FAN"
+            visible: panel.host.state.supported.fan.length > 0
+            ChoiceFlow {
+              kind: "fan"
+              current: panel.host.state.fan || ""
+              options: panel.host.state.supported.fan
+            }
+          }
+
+          // Its own centred row between the essentials and the rest, rather than one
+          // more button in the stack where it read as just another control.
+          Item {
+            width: parent.width
+            height: moreButton.implicitHeight + Style.space(4)
+            Button {
+              id: moreButton
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: panel.showMore ? "Less  ▴" : "More  ▾"
+              foreground: panel.foreground
+              fontFamily: panel.fontFamily
+              onClicked: panel.showMore = !panel.showMore
+            }
+          }
+
+          Card {
+            heading: "SWING"
+            visible: panel.showMore && panel.host.state.supported.swing.length > 0
+            ChoiceFlow {
+              kind: "swing"
+              current: panel.host.state.swing || ""
+              options: panel.host.state.supported.swing
+            }
+          }
+
+          Card {
+            heading: "PRESET"
+            visible: panel.showMore && panel.host.state.supported.preset.length > 0
+            ChoiceFlow {
+              kind: "preset"
+              current: panel.host.state.preset || ""
+              options: panel.host.state.supported.preset
             }
           }
 
           Button {
+            visible: panel.showMore
             text: "Change device"
             foreground: panel.foreground
             fontFamily: panel.fontFamily
