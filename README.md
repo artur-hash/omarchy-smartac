@@ -1,15 +1,22 @@
 # SmartThings AC
 
-Turn an air conditioner on and off and set its temperature from the Omarchy
-bar. The bar shows the room temperature while the unit is running.
+Control an air conditioner from the Omarchy bar: power, target temperature,
+mode, fan speed, swing and presets. The bar shows the room temperature whether
+or not the unit is running, and the panel adds humidity and a feels-like figure.
 
-Built for a Samsung WindFree, but nothing in it is Samsung-specific: any air
-conditioner SmartThings exposes works the same way.
+Built against a Samsung WindFree, but nothing in it is Samsung-specific. Every
+control is built from the capability list the device itself publishes, so a
+unit offering different modes shows different buttons with no code change, and
+the temperature range comes from the device rather than a constant.
 
 ## What it does not do
 
-Mode (cool / dry / wind / auto / heat), fan speed, scheduling, and more than
-one unit at a time. All are possible; none are here yet.
+Scheduling, and more than one unit at a time. Both are possible; neither is
+here yet.
+
+Air quality is deliberately absent. The capability exists on the unit this was
+built against, but both of its dust sensors report null, so there would be
+nothing to show.
 
 There is no local control. Newer Samsung units answer only through Samsung's
 cloud — the local protocol older models spoke on port 2878 is gone — so this
