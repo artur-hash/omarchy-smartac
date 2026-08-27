@@ -27,14 +27,36 @@ Item {
   readonly property string label: Model.barLabel(root.state)
   readonly property bool stale: root.consecutiveFailures > 0
 
-  function open()  { if (panelLoader.item) panelLoader.item.controller.open = true }
-  function close() { if (panelLoader.item) panelLoader.item.controller.open = false }
+  // The panel anchors its popup to this, not to the widget root. Ui/PopupCard
+  // and Ui/KeyboardPanel both position from anchorItem's mapped geometry, and
+  // the root Item is not the thing the user clicked — anchoring to it put the
+  // panel at 0,0.
+  readonly property alias anchorButton: button
+
+  // Ui/Panel owns open/close/toggle; driving controller.open from outside
+  // skipped whatever else those do. parm.clock and the first-party panels all
+  // call the functions.
+  function open()  { if (panelLoader.item) panelLoader.item.open() }
+  function close() { if (panelLoader.item) panelLoader.item.close() }
   function togglePanel() {
     if (!panelLoader.item) return
-    var willOpen = !panelLoader.item.controller.open
-    panelLoader.item.controller.open = willOpen
+    var willOpen = !panelLoader.item.opened
+    panelLoader.item.toggle()
     if (willOpen) panelLoader.item.refreshAll()
   }
+
+  // Re-injected rather than set once on load: at onLoaded the button is not
+  // yet inside the bar's window, so anchorItem.QsWindow is undefined and
+  // KeyboardPanel resolves no screen — it then shows nothing, silently.
+  function injectPanel() {
+    var t = panelLoader.item
+    if (!t) return
+    t.host = root
+    t.bar = root.bar
+    t.anchorButton = button
+  }
+  onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
 
   function refresh() {
     if (root.deviceId === "") { root.state = Model.emptyState(); return }
@@ -103,8 +125,7 @@ Item {
     id: panelLoader
     source: Qt.resolvedUrl("Panel.qml")
     onLoaded: {
-      item.host = root
-      item.bar = root.bar
+      root.injectPanel()
       item.foreground = Qt.binding(function() { return root.contentForeground })
       item.fontFamily = Qt.binding(function() { return root.contentFontFamily })
     }
