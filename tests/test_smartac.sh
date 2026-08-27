@@ -591,6 +591,63 @@ test_full_status_still_checks_health() {
   teardown
 }
 
+# A response is bounded while it is arriving, not after. Without this the whole
+# body lands in a shell variable and then in the QML side's StdioCollector, so
+# a hostile or broken endpoint could exhaust the shared omarchy-shell rather
+# than just this plugin.
+test_oversized_response_is_refused() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  # Two megabytes of valid JSON: over the one megabyte ceiling.
+  { printf '{"pad":"'; head -c 2097152 /dev/zero | tr '\0' 'x'; printf '"}'; } > "$TMP/huge.json"
+  fake_curl 200 "$TMP/huge.json"
+  out=$("$ROOT/bin/smartac" devices --json 2>&1); rc=$?
+  check "an oversized response exits 10" "$rc" "10"
+  grep -q 'exceeded' <<<"$out" && ok "the error says it was refused" || bad "the error says it was refused" "$out"
+  teardown
+}
+
+test_response_at_the_ceiling_still_works() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
+  rc=0; "$ROOT/bin/smartac" devices --json >/dev/null 2>&1 || rc=$?
+  check "an ordinary response is untouched" "$rc" "0"
+  teardown
+}
+
+# Every string the far end controls is truncated before it reaches the panel.
+# A device label is attacker-controlled once the endpoint is not trusted, and
+# none of these has a legitimate reason to be long.
+test_remote_strings_are_truncated() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  long=$(head -c 5000 /dev/zero | tr '\0' 'L')
+  jq -n --arg l "$long" '{items:[{deviceId:"ac-1", label:$l,
+    components:[{id:"main", capabilities:[{id:"airConditionerMode"}]}]}]}' > "$TMP/longlabel.json"
+  fake_curl 200 "$TMP/longlabel.json"
+  out=$("$ROOT/bin/smartac" devices --json 2>&1)
+  len=$(jq -r '.devices[0].label | length' <<<"$out")
+  check "a long device label is clamped to MAX_STRING" "$len" "128"
+  teardown
+}
+
+# And every list is capped, so a payload claiming ten thousand supported modes
+# cannot become ten thousand buttons.
+test_remote_lists_are_capped() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  jq -n '{components:{main:{airConditionerMode:{
+      airConditionerMode:{value:"cool"},
+      supportedAcModes:{value:[range(5000) | tostring]}}}}}' > "$TMP/longlist.json"
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$TMP/longlist.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1 2>&1)
+  n=$(jq -r '.supported.mode | length' <<<"$out")
+  check "a long supported list is capped to MAX_LIST" "$n" "64"
+  teardown
+}
+
 test_mode_sends_setAirConditionerMode
 test_mode_rejects_unsupported_value
 test_fan_sends_setFanMode
@@ -604,6 +661,10 @@ test_no_validate_skips_the_lookup_request
 test_validation_still_runs_by_default
 test_quick_status_skips_the_health_call
 test_full_status_still_checks_health
+test_oversized_response_is_refused
+test_response_at_the_ceiling_still_works
+test_remote_strings_are_truncated
+test_remote_lists_are_capped
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -6,7 +6,28 @@ set -uo pipefail
 API="https://api.smartthings.com/v1"
 SECRET_SERVICE="smartac"
 
+# Ceilings on anything the far end controls. A real status payload is a few
+# kilobytes and a real account has a handful of air conditioners, so these are
+# generous by orders of magnitude -- their job is to make the cost of a hostile
+# or broken response bounded, not to be tight. Nothing derived from the network
+# reaches QML without passing one of them.
+MAX_RESPONSE_BYTES=1048576   # a whole HTTP response, enforced while it arrives
+MAX_STRING=128               # any single string forwarded to the panel
+MAX_LIST=64                  # entries in a supported-values list
+MAX_DEVICES=200              # rows in the device picker
+
 die()  { printf '{"error":%s}\n' "$(jq -Rn --arg m "$1" '$m')" >&2; exit "${2:-1}"; }
+
+# Prelude shared by every jq filter that shapes a remote payload into the small
+# object QML consumes. A device label, a mode name and a supported-values list
+# are all attacker-controlled in the threat model where the cloud endpoint is
+# not trusted, and none of them has a legitimate reason to be long.
+JQ_CLAMP='
+  def clampstr($n): if type == "string" then .[0:$n] else . end;
+  def clampstr: clampstr($MAXSTR);
+  def clamplist: if type == "array" then [ .[0:$MAXLIST][] | clampstr ] else [] end;
+'
+jq_shape() { jq --argjson MAXSTR "$MAX_STRING" --argjson MAXLIST "$MAX_LIST" "$@"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1" 4; }
 need jq
 
@@ -67,14 +88,50 @@ api() {
   token_escaped="${token//\\/\\\\}"
   token_escaped="${token_escaped//\"/\\\"}"
 
-  local args=(-sS -X "$method" -H "Accept: application/json" -m 15 -w $'\n%{http_code}')
+  local args=(-sS -X "$method" -H "Accept: application/json" -m 15
+              --max-filesize "$MAX_RESPONSE_BYTES" -w $'\n%{http_code}')
   [[ -n $body ]] && args+=(-H "Content-Type: application/json" -d "$body")
 
+  # The response is bounded while it is still arriving, not after it has been
+  # read. head closes the pipe once it has taken its fill and curl dies of
+  # SIGPIPE, so an oversized or never-terminating stream costs this much and
+  # stops -- it cannot grow a shell variable without limit, and it cannot reach
+  # the QML side's StdioCollector, which would put the whole shared shell at the
+  # mercy of whatever answers on the other end of the socket.
+  #
+  # --max-filesize covers the honest case where a length is declared up front;
+  # head covers the dishonest one where it is not. Both are needed.
+  #
+  # One extra byte is requested so that hitting the ceiling is distinguishable
+  # from landing exactly on it, and overflow fails closed: a truncated body is
+  # not parsed, guessed at, or passed on.
+  #
   # curl's own stderr is silenced: a malformed -K record (see cmd_token's
   # control-character check) makes curl echo the offending config line back
   # on stderr, and this process's stderr is not collected by the QML side —
   # it would otherwise flow straight into the shell's journal.
-  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | curl -K - "${args[@]}" "$API$path" 2>/dev/null) || die "network unreachable" 6
+  local curl_rc
+  raw=$(
+    printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" \
+      | curl -K - "${args[@]}" "$API$path" 2>/dev/null \
+      | head -c "$((MAX_RESPONSE_BYTES + 1))"
+    # Inside the substitution, where the pipeline that just ran is still the
+    # one PIPESTATUS describes. Read from the right, so a body containing
+    # newlines cannot be mistaken for it.
+    printf '\n%s' "${PIPESTATUS[1]}"
+  )
+  curl_rc="${raw##*$'\n'}"
+  raw="${raw%$'\n'*}"
+
+  # Size is judged before curl's exit status, because enforcing the ceiling is
+  # what kills curl: head closes the pipe, curl dies of SIGPIPE, and its status
+  # is non-zero as a direct result. Reading the status first would report every
+  # oversized response as a network failure and hide the thing being defended
+  # against.
+  (( $(printf '%s' "$raw" | wc -c) > MAX_RESPONSE_BYTES )) \
+    && die "the response exceeded $MAX_RESPONSE_BYTES bytes and was refused" 10
+  [[ $curl_rc == 0 ]] || die "network unreachable" 6
+
   status="${raw##*$'\n'}"
   out="${raw%$'\n'*}"
 
@@ -92,10 +149,10 @@ api() {
 cmd_devices() {
   # airConditionerMode, not switch: switch alone matches every lamp in the
   # account, and a picker full of lamps is worse than no picker.
-  api GET /devices | jq '{
-    devices: [ .items[]
+  api GET /devices | jq_shape --argjson MAXDEV "$MAX_DEVICES" "$JQ_CLAMP"'{
+    devices: [ .items[]?
       | select(any(.components[]?.capabilities[]?; .id == "airConditionerMode"))
-      | { id: .deviceId, label: (.label // .name // .deviceId) } ]
+      | { id: (.deviceId | clampstr), label: ((.label // .name // .deviceId) | clampstr) } ][0:$MAXDEV]
   }'
 }
 
@@ -129,28 +186,28 @@ cmd_status() {
     [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
   fi
 
-  api GET "/devices/$device/status" | jq --argjson online "$online" '
+  api GET "/devices/$device/status" | jq_shape --argjson online "$online" "$JQ_CLAMP"'
     .components.main as $m | {
-      power:       ($m.switch.switch.value // "off"),
+      power:       ($m.switch.switch.value // "off" | clampstr),
       temperature: ($m.temperatureMeasurement.temperature.value // null),
       setpoint:    ($m.thermostatCoolingSetpoint.coolingSetpoint.value // null),
-      unit:        ($m.temperatureMeasurement.temperature.unit // "C"),
+      unit:        ($m.temperatureMeasurement.temperature.unit // "C" | clampstr),
       online:      $online,
 
-      mode:    ($m.airConditionerMode.airConditionerMode.value // null),
-      fan:     ($m.airConditionerFanMode.fanMode.value // null),
-      swing:   ($m.fanOscillationMode.fanOscillationMode.value // null),
-      preset:  ($m["custom.airConditionerOptionalMode"].acOptionalMode.value // null),
+      mode:    ($m.airConditionerMode.airConditionerMode.value // null | clampstr),
+      fan:     ($m.airConditionerFanMode.fanMode.value // null | clampstr),
+      swing:   ($m.fanOscillationMode.fanOscillationMode.value // null | clampstr),
+      preset:  ($m["custom.airConditionerOptionalMode"].acOptionalMode.value // null | clampstr),
       humidity: ($m.relativeHumidityMeasurement.humidity.value // null),
 
       # The lists the device itself publishes. The panel builds its pills from
       # these rather than from a hardcoded set, so a firmware update that drops
       # a mode removes its button without a code change.
       supported: {
-        mode:   ($m.airConditionerMode.supportedAcModes.value // []),
-        fan:    ($m.airConditionerFanMode.supportedAcFanModes.value // []),
-        swing:  ($m.fanOscillationMode.supportedFanOscillationModes.value // []),
-        preset: ($m["custom.airConditionerOptionalMode"].supportedAcOptionalMode.value // [])
+        mode:   ($m.airConditionerMode.supportedAcModes.value | clamplist),
+        fan:    ($m.airConditionerFanMode.supportedAcFanModes.value | clamplist),
+        swing:  ($m.fanOscillationMode.supportedFanOscillationModes.value | clamplist),
+        preset: ($m["custom.airConditionerOptionalMode"].supportedAcOptionalMode.value | clamplist)
       },
 
       # Read from the device, not assumed. The old hardcoded 16-30 happened to
@@ -210,11 +267,12 @@ send_enum_command() {
     return
   fi
   supported=$(api GET "/devices/$device/status" \
-    | jq -r --arg p "$jqpath" '.components.main[$p] // {} | to_entries[]
-        | select(.key | startswith("supported")) | .value.value // [] | .[]' 2>/dev/null | sort -u)
+    | jq_shape -r --arg p "$jqpath" "$JQ_CLAMP"'.components.main[$p] // {} | to_entries[]
+        | select(.key | startswith("supported")) | (.value.value | clamplist) | .[]' 2>/dev/null \
+    | sort -u | head -n "$MAX_LIST")
   [[ -n $supported ]] || die "the device published no supported $label values" 9
   grep -qxF -- "$value" <<<"$supported" \
-    || die "$label '$value' is not supported by this device; supported: $(tr '\n' ' ' <<<"$supported" | sed 's/ $//')" 2
+    || die "$label '$value' is not supported by this device; supported: $(tr '\n' ' ' <<<"$supported" | sed 's/ $//' | cut -c "1-$((MAX_STRING * 8))")" 2
   send_command "$device" "$capability" "$command" "$(jq -cn --arg v "$value" '[$v]')"
 }
 
@@ -270,8 +328,8 @@ cmd_doctor() {
     require_device "$device"
     local devices_payload capabilities_list device_found
     devices_payload=$(api GET /devices) || return 1
-    capabilities_list=$(jq -r --arg d "$device" '.items[] | select(.deviceId == $d)
-          | .components[]?.capabilities[]?.id' <<<"$devices_payload" | sort)
+    capabilities_list=$(jq_shape -r --arg d "$device" "$JQ_CLAMP"'.items[]? | select(.deviceId == $d)
+          | .components[]?.capabilities[]?.id | clampstr' <<<"$devices_payload" | sort | head -n "$MAX_LIST")
     device_found=$(jq -r --arg d "$device" '[.items[] | select(.deviceId == $d)] | length' <<<"$devices_payload")
     if [[ $device_found -eq 0 ]]; then
       die "device not found: $device" 2

@@ -93,6 +93,23 @@ confirms in roughly that time rather than the instant the write succeeds.
 None of these rules are hardcoded. Other hardware has other constraints, and a
 list written here would go stale the first time a firmware update moved one.
 
+## What the backend trusts
+
+Nothing the network says, beyond its shape.
+
+`omarchy-shell` is one long-lived process shared by every widget, and the QML
+side collects this helper's whole stdout. A response with no ceiling on it is
+therefore a way for whatever answers on the other end of the socket to exhaust
+the shell, not just this plugin. So the ceiling is enforced while the response
+is arriving rather than after it has been read: `head` closes the pipe once it
+has taken its fill and curl dies of SIGPIPE, and an overflow fails closed —
+a truncated body is never parsed, guessed at, or passed on.
+
+Past that, every value forwarded to the panel is clamped: strings to 128
+characters, supported-value lists to 64 entries, the device picker to 200 rows.
+A real payload is orders of magnitude under all of these. They exist so the
+cost of a hostile or broken response stays bounded, not to be tight.
+
 ## Diagnostics
 
 ```bash
