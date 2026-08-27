@@ -72,6 +72,12 @@ Observed on a Samsung AR12BSEAAWKNAZ:
 - **The setpoint cannot be changed while the unit is off.**
 - **Each mode keeps its own setpoint**, so the temperature shown changes on its
   own when the mode does. That is the device remembering, not a misread.
+- **Choosing a mode turns the unit on.** Sending a mode to a unit that is off
+  powers it up rather than storing the setting for later.
+
+The cloud reflects a change about three seconds after the command returns --
+measured on this unit, absent at 1.4s and present by 3.2s -- so the panel
+confirms in roughly that time rather than the instant the write succeeds.
 
 None of these rules are hardcoded. Other hardware has other constraints, and a
 list written here would go stale the first time a firmware update moved one.

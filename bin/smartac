@@ -104,11 +104,16 @@ cmd_devices() {
 require_device() { [[ -n ${1:-} ]] || die "pass --device <id>" 2; }
 
 cmd_status() {
-  local device=""
+  local device="" quick=0
   while (( $# )); do
     case "$1" in
       --device) [[ -n ${2:-} ]] || die "--device requires a value" 2; device="$2"; shift 2 ;;
       --json)   shift ;;
+      # Skips the reachability call and reports online as null -- unknown, not
+      # false. The panel uses this when confirming a write it just sent: it
+      # already knows whether the device is reachable, and halving the requests
+      # is what lets the confirmation run at three seconds instead of eight.
+      --quick)  quick=1; shift ;;
       *)        die "unknown argument: $1" 2 ;;
     esac
   done
@@ -117,10 +122,12 @@ cmd_status() {
   # Two calls. /status answers with the last values it saw and says nothing
   # about reachability, so an unplugged AC returns yesterday's numbers and
   # looks healthy. /health is the only thing that tells the two apart.
-  local health online
-  health=$(api GET "/devices/$device/health") || exit $?
-  online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
-  [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
+  local health online="null"
+  if (( ! quick )); then
+    health=$(api GET "/devices/$device/health") || exit $?
+    online=$(jq -r 'if .state == "ONLINE" then "true" else "false" end' <<<"$health") || die "malformed health response" 8
+    [[ $online == true || $online == false ]] || die "unexpected online value: $online" 8
+  fi
 
   api GET "/devices/$device/status" | jq --argjson online "$online" '
     .components.main as $m | {

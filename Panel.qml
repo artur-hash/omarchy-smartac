@@ -54,6 +54,13 @@ Panel {
   property var pending: null        // { kind, value, label }
   property int verifyAttempts: 0
 
+  // Gaps between confirmation reads, so the checks land at roughly 3, 5, 7 and
+  // 11 seconds after the write. Measured on the hardware: a preset and a mode
+  // change were both absent from the cloud at 1.4s and present by 3.0-3.2s, so
+  // the first check usually settles it and the rest exist for a slow day. The
+  // old single check at 8s was three times longer than anything needed.
+  readonly property var verifyDelays: [3000, 1800, 2500, 4000]
+
   // A control the last write asked for but nothing has confirmed yet. It is
   // drawn selected so the click registers, and dimmed so the panel never claims
   // a state it has not read back -- the difference between "asked" and "done".
@@ -173,6 +180,7 @@ Panel {
       // reported state lags the write. Reading now returns the old value and
       // looks like a failure, so the read waits.
       panel.verifyAttempts = 0
+      verifyTimer.interval = panel.verifyDelays[0]
       verifyTimer.restart()
     }
   }
@@ -187,8 +195,14 @@ Panel {
     stdout: StdioCollector { id: verifyOut; waitForEnd: true }
     onExited: function(exitCode) {
       var st = Model.parseStatus(verifyOut.text)
-      // The panel paid for this read; the bar should not pay for it again.
-      if (st.ok && panel.host) panel.host.state = st
+      if (st.ok && panel.host) {
+        // A quick read skips the reachability call, so it has nothing to say
+        // about it. Carrying the last known value forward beats letting the
+        // parser's default turn every confirmation into "device offline".
+        st.online = panel.host.state.online
+        // The panel paid for this read; the bar should not pay for it again.
+        panel.host.state = st
+      }
       panel.settlePending(st)
     }
   }
@@ -203,9 +217,12 @@ Panel {
     interval: 8000
     repeat: false
     onTriggered: {
-      if (!panel.pending || !panel.host || panel.host.deviceId === "") { panel.pending = null; return }
-      panel.verifyAttempts = panel.verifyAttempts + 1
-      verifier.command = [panel.bin, "status", "--json", "--device", panel.host.deviceId]
+      if (!panel.host || panel.host.deviceId === "") return
+      // Come back rather than give up: dropping this tick would strand the
+      // pending write with nothing left to settle it.
+      if (verifier.running) { verifyTimer.interval = 1000; verifyTimer.restart(); return }
+      if (panel.pending) panel.verifyAttempts = panel.verifyAttempts + 1
+      verifier.command = [panel.bin, "status", "--json", "--quick", "--device", panel.host.deviceId]
       verifier.running = true
     }
   }
@@ -213,13 +230,37 @@ Panel {
   function settlePending(st) {
     if (!panel.pending) return
     var want = panel.pending
-    if (!st || !st.ok) { panel.pending = null; return }
+    // A read that failed -- rate limited, network down -- says nothing about
+    // whether the write landed. Try again if there are tries left rather than
+    // quietly dropping the request on the floor.
+    if (!st || !st.ok) {
+      if (panel.verifyAttempts < panel.verifyDelays.length) {
+        verifyTimer.interval = panel.verifyDelays[panel.verifyAttempts]
+        verifyTimer.restart()
+      } else {
+        panel.pending = null
+      }
+      return
+    }
 
     var got = want.kind === "temp" ? String(st.setpoint) : String(st[want.kind] || "")
-    if (got === want.value) { panel.pending = null; return }
+    if (got === want.value) {
+      panel.pending = null
+      // One more read shortly after. Settings cascade on this hardware -- a mode
+      // change drops the preset and each mode carries its own setpoint -- and
+      // the confirming read is often too early to have seen the rest move.
+      verifyTimer.interval = 4000
+      verifyTimer.restart()
+      return
+    }
 
-    // Give a slow device one more chance before calling it a failure.
-    if (panel.verifyAttempts < 2) { verifyTimer.restart(); return }
+    // Escalating gaps rather than one long wait, so a slow answer costs time
+    // only when it is actually slow.
+    if (panel.verifyAttempts < panel.verifyDelays.length) {
+      verifyTimer.interval = panel.verifyDelays[panel.verifyAttempts]
+      verifyTimer.restart()
+      return
+    }
 
     panel.pending = null
     panel.actionError = "The device did not apply " + want.label + " " + want.value

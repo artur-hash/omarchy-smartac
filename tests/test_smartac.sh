@@ -564,6 +564,33 @@ test_validation_still_runs_by_default() {
   teardown
 }
 
+# The confirmation read after a write does not need reachability -- the panel
+# already knows it -- and halving the requests is what lets that read run at
+# three seconds instead of eight.
+test_quick_status_skips_the_health_call() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" status --json --quick --device ac-1 2>&1)
+  health=$(grep -c '/health' "$TMP/curl.args" || true)
+  check "--quick makes no health call" "$health" "0"
+  check "--quick reports online as unknown" "$(jq -r .online <<<"$out")" "null"
+  check "--quick still reports the mode" "$(jq -r .mode <<<"$out")" "heat"
+  teardown
+}
+
+test_full_status_still_checks_health() {
+  setup
+  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  echo '{"state":"ONLINE"}' >"$TMP/health.json"
+  fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status-full.json"
+  out=$("$ROOT/bin/smartac" status --json --device ac-1 2>&1)
+  health=$(grep -c '/health' "$TMP/curl.args" || true)
+  check "the default status still asks health" "$health" "1"
+  check "and reports a real online value" "$(jq -r .online <<<"$out")" "true"
+  teardown
+}
+
 test_mode_sends_setAirConditionerMode
 test_mode_rejects_unsupported_value
 test_fan_sends_setFanMode
@@ -575,6 +602,8 @@ test_completed_command_is_reported_as_success
 test_missing_results_array_is_still_success
 test_no_validate_skips_the_lookup_request
 test_validation_still_runs_by_default
+test_quick_status_skips_the_health_call
+test_full_status_still_checks_health
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
