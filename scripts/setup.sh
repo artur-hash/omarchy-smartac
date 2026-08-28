@@ -31,11 +31,12 @@ say "${BOLD}SmartThings AC plugin setup${RESET}"
 say ""
 
 # ---- 1. node and npm ------------------------------------------------------
-# Installing these is the system's business, not this script's: the right
-# command differs per distribution and doing it silently would be the kind of
-# thing nobody expects from a bar widget.
-command -v node >/dev/null 2>&1 || fail "node is not installed. Install it first (on Arch: sudo pacman -S nodejs npm)"
-command -v npm  >/dev/null 2>&1 || fail "npm is not installed. Install it first (on Arch: sudo pacman -S npm)"
+# Installing these is the system's business, not this script's: the right command
+# differs per distribution and doing it silently is not what anyone expects from
+# a bar widget. Nor does the advice name one -- this script never elevates, and a
+# reader should not have to read it to be sure of that.
+command -v node >/dev/null 2>&1 || fail "node is not installed. Install it with your distribution package manager, then re-run this script"
+command -v npm  >/dev/null 2>&1 || fail "npm is not installed. Install it with your distribution package manager, then re-run this script"
 ok "node $(node --version)"
 
 # ---- 2. the SmartThings CLI ----------------------------------------------
