@@ -624,7 +624,9 @@ Panel {
           }
 
           Text {
-            visible: panel.host && panel.host.stale
+            // Never on the setup screen: with no token there is no stale data,
+            // only no data, and that screen already explains it.
+            visible: panel.hasToken && panel.host && panel.host.stale
             width: parent.width
             wrapMode: Text.WordWrap
             text: "Showing the last known state — SmartThings is not answering."

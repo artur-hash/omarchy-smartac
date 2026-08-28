@@ -73,10 +73,18 @@ Item {
   Process {
     id: reader
     stdout: StdioCollector { id: readOut; waitForEnd: true }
-    onExited: {
+    onExited: function(exitCode) {
       var next = Model.parseStatus(readOut.text)
       if (next.ok) {
         root.state = next
+        root.consecutiveFailures = 0
+      } else if (exitCode === 2) {
+        // Exit 2 is "no token stored", which is not a failed read. Counting it
+        // keeps the failures accumulating from the moment a token expires, so
+        // the bar stays dimmed and the setup screen carries a "stale" badge --
+        // blaming the network for the one condition that screen already
+        // explains, and backing the poll off to ten minutes so a freshly
+        // pasted token takes that long to be noticed.
         root.consecutiveFailures = 0
       } else {
         // Keep the last known state rather than blanking the bar, but stop
