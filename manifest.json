@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.artur-hash.smartac",
   "name": "SmartThings AC",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "artur-hash",
   "license": "MIT",
-  "description": "Control an air conditioner from the bar: power, temperature, mode, fan speed, swing and presets, through the SmartThings API.",
+  "description": "Control an air conditioner from the bar through the SmartThings API. Authenticates through the SmartThings CLI, whose session renews itself.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"

@@ -26,6 +26,18 @@ There is no local control. Newer Samsung units answer only through Samsung's
 cloud — the local protocol older models spoke on port 2878 is gone — so this
 plugin talks to SmartThings and needs the internet to do anything.
 
+## Upgrading from 1.x
+
+**A pasted personal access token no longer works.** SmartThings expires one 24
+hours after it is created, which made the plugin ask for a new credential every
+morning, so that path was removed rather than kept as a fallback nobody should
+choose. Run the setup script once and the plugin authenticates through the
+SmartThings CLI instead, whose session renews itself.
+
+Any token 1.x stored in your keyring is now unused; the plugin no longer reads
+or writes there at all. `secret-tool clear service smartac key token` removes it
+if you want it gone.
+
 ## Requirements
 
 - Omarchy 4 (Quattro)
