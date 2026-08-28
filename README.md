@@ -48,6 +48,17 @@ Click the icon in the bar. With no token stored, the panel is the setup screen:
 
 Then pick your air conditioner from the list.
 
+**A personal access token lasts 24 hours.** SmartThings expires one a day
+after it is created — tokens issued before 30 December 2024 could last up to
+fifty years, but new ones cannot. So this is a daily chore, and that is a
+property of the credential rather than of this plugin. When the token lapses
+the panel says it was rejected and returns to the setup screen.
+
+The lasting fix is OAuth, where a refresh token buys a new access token
+without anyone retyping anything. It needs an API-only SmartApp registered in
+the SmartThings developer workspace, which is a larger piece of work than this
+plugin currently is; it is not here yet.
+
 ## About the token
 
 A SmartThings personal access token grants control of **every device in your

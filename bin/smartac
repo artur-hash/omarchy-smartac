@@ -138,7 +138,7 @@ api() {
   case "$status" in
     2*)  printf '%s' "$out" ;;
     401) secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
-         die "the token was rejected; enter a new one" 3 ;;
+         die "the token was rejected — SmartThings expires one 24 hours after it is created; generate another" 3 ;;
     429) die "rate limited by SmartThings" 7 ;;
     *)   die "SmartThings returned HTTP $status" 8 ;;
   esac

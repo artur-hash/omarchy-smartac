@@ -502,7 +502,10 @@ Panel {
             text: "1.  Open account.smartthings.com/tokens\n" +
                   "2.  Generate a new personal access token\n" +
                   "3.  Grant only the Devices scopes: list, read, execute\n" +
-                  "4.  Paste it below. It is stored in your login keyring, never in a config file."
+                  "4.  Paste it below. It is stored in your login keyring, never in a config file.\n\n" +
+                  "SmartThings expires a personal access token 24 hours after it is\n" +
+                  "created, so this needs doing again tomorrow. When it lapses the\n" +
+                  "panel returns to this screen."
           }
 
           TextField {
