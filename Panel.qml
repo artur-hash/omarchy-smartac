@@ -332,7 +332,7 @@ Panel {
   // running it would be overreach.
   Process {
     id: copyCommand
-    command: ["wl-copy", "npm install -g @smartthings/cli"]
+    command: ["wl-copy", "~/.config/omarchy/plugins/io.github.artur-hash.smartac/scripts/setup.sh"]
     onExited: { panel.copied = true; copyReset.restart() }
   }
   Timer { id: copyReset; interval: 2500; onTriggered: panel.copied = false }
@@ -484,11 +484,12 @@ Panel {
                 + "and approve in the browser that opens.\n\n"
                 + "(The same thing, by hand: smartthings locations)"
               : "This plugin reads the session the SmartThings CLI keeps, so there is "
-                + "nothing to paste and nothing that expires. Install it:\n\n"
-                + "    npm install -g @smartthings/cli\n\n"
-                + "then reopen this panel. If it is already installed, the shell cannot "
-                + "see it on its PATH — the terminal's PATH and the session's are not "
-                + "always the same."
+                + "nothing to paste and nothing that expires.\n\n"
+                + "One command does the whole setup — it asks before installing "
+                + "anything:\n\n"
+                + "    ~/.config/omarchy/plugins/io.github.artur-hash.smartac/scripts/setup.sh\n\n"
+                + "If the CLI is already installed, the shell cannot see it on its "
+                + "PATH: the terminal's PATH and the session's are not always the same."
           }
 
           Text {
@@ -519,7 +520,7 @@ Panel {
 
             Button {
               visible: !panel.cliInstalled
-              text: panel.copied ? "Copied" : "Copy install command"
+              text: panel.copied ? "Copied" : "Copy setup command"
               foreground: panel.foreground
               fontFamily: panel.fontFamily
               onClicked: copyCommand.running = true
