@@ -64,9 +64,12 @@ same thing as that second command.
 Install the CLI **globally**, not through `npx`. This plugin stores no
 credential of its own and never touches the keyring — it reads the session the
 CLI keeps, the way other tools read `gcloud`'s or `gh`'s, and that session
-renews itself. But the CLI only renews it when one of its own commands runs, so
-without `smartthings` on `PATH` the session works for a day and then dies. The
-panel and `doctor` both say so rather than leaving you to guess.
+renews itself. But the CLI only renews it when one of its own commands runs, so the plugin has
+to be able to find it. PATH is not enough on its own — the shell takes its
+environment from the session, not from your terminal's rc — so it also looks
+where npm, mise, nvm, volta and asdf put things. If it cannot find the binary
+anywhere, the panel and `doctor` both say so rather than letting the session
+work for a day and then quietly stop renewing.
 
 ### Why there is no token to paste
 

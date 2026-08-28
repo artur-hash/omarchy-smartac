@@ -645,5 +645,34 @@ test_no_session_exits_2
 test_the_session_never_reaches_argv
 test_a_rejected_session_is_not_deleted
 
+# The shell that runs this plugin takes its environment from the session, not
+# from the user's terminal rc, so a CLI installed through a version manager can
+# be present and invisible on PATH -- and the failure is silent and delayed: the
+# session works for a day and then stops renewing. The binary is therefore
+# looked for where these tools actually put it.
+test_the_cli_is_found_off_PATH() {
+  setup
+  fake_cli_session
+  mkdir -p "$TMP/home/.local/share/mise/shims"
+  printf '#!/bin/sh\nexit 0\n' > "$TMP/home/.local/share/mise/shims/smartthings"
+  chmod +x "$TMP/home/.local/share/mise/shims/smartthings"
+  out=$(HOME="$TMP/home" "$ROOT/bin/smartac" credential)
+  check "a version manager's shim counts as installed" "$(jq -r .cliInstalled <<<"$out")" "true"
+  check "and the session can renew" "$(jq -r .renewable <<<"$out")" "true"
+  teardown
+}
+
+test_no_cli_anywhere_is_reported() {
+  setup
+  fake_cli_session
+  out=$(HOME="$TMP/nowhere" "$ROOT/bin/smartac" credential)
+  check "with no binary at all: not installed" "$(jq -r .cliInstalled <<<"$out")" "false"
+  check "and the session cannot renew" "$(jq -r .renewable <<<"$out")" "false"
+  teardown
+}
+
+test_the_cli_is_found_off_PATH
+test_no_cli_anywhere_is_reported
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

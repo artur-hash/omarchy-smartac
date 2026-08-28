@@ -59,9 +59,42 @@ cli_credentials_file() {
 # window renews the session. Rather than rotate the pair here -- writing another
 # tool's credential file, and owning the failure where a spent refresh token is
 # never replaced -- we let it do its own job and simply ask.
+# PATH is not a reliable way to find this. The shell that runs this plugin gets
+# its environment from the session, not from the user's terminal rc, so a CLI
+# installed through nvm, mise, volta, asdf or an npm prefix can be perfectly
+# present and still invisible here -- and the failure is silent and delayed: the
+# session works for a day and then stops renewing.
+#
+# So the binary is looked for where these tools actually put it, rather than the
+# user being told to repair a PATH they did not know was involved.
+cli_bin() {
+  local c
+  c=$(command -v smartthings 2>/dev/null) && { printf '%s' "$c"; return 0; }
+  local prefix
+  prefix=$(npm config get prefix 2>/dev/null) || prefix=""
+  for c in ${prefix:+"$prefix/bin/smartthings"} \
+           "$HOME/.local/share/mise/shims/smartthings" \
+           "$HOME/.local/bin/smartthings" \
+           "$HOME/.npm-global/bin/smartthings" \
+           "$HOME/.volta/bin/smartthings" \
+           "$HOME/.asdf/shims/smartthings" \
+           "$HOME/.bun/bin/smartthings" \
+           /usr/local/bin/smartthings /usr/bin/smartthings; do
+    [[ -x $c ]] && { printf '%s' "$c"; return 0; }
+  done
+  # Version managers keep one copy per installed runtime; take the newest.
+  for c in "$HOME"/.local/share/mise/installs/node/*/bin/smartthings \
+           "$HOME"/.nvm/versions/node/*/bin/smartthings \
+           "$HOME"/.local/share/fnm/node-versions/*/installation/bin/smartthings; do
+    [[ -x $c ]] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
 cli_refresh() {
-  command -v smartthings >/dev/null 2>&1 || return 1
-  smartthings locations --json >/dev/null 2>&1
+  local bin
+  bin=$(cli_bin) || return 1
+  "$bin" locations --json >/dev/null 2>&1
 }
 
 TOKEN_VALUE=""
@@ -92,7 +125,7 @@ resolve_token() {
 # CLI is there but nobody has logged in. Each has a different next step.
 cmd_credential() {
   local installed=false session=false renewable=false
-  command -v smartthings >/dev/null 2>&1 && installed=true
+  cli_bin >/dev/null 2>&1 && installed=true
   resolve_token 2>/dev/null && session=true
   [[ $installed == true && $session == true ]] && renewable=true
   printf '{"ready":%s,"cliInstalled":%s,"session":%s,"renewable":%s}\n' \
@@ -375,20 +408,20 @@ cmd_doctor() {
   local t
   if resolve_token 2>/dev/null; then
     t="$TOKEN_VALUE"
-    if command -v smartthings >/dev/null 2>&1; then
+    if cli_bin >/dev/null 2>&1; then
       # Four characters tells two sessions apart and is not enough to use one.
       printf '  ok    SmartThings CLI session (%s...) — renews itself\n' "${t:0:4}"
     else
       # Real, and unrenewable: the CLI refreshes only when one of its own
       # commands runs, and there is none on PATH. Left unsaid, this looks
       # healthy for a day and then fails with no hint why.
-      printf '  --    CLI session found (%s...) but "smartthings" is not on PATH\n' "${t:0:4}"
-      printf '        it cannot renew and will expire; install it globally:\n'
+      printf '  --    CLI session found (%s...) but the smartthings binary is gone\n' "${t:0:4}"
+      printf '        it cannot renew and will expire; reinstall it:\n'
       printf '        npm install -g @smartthings/cli\n'
     fi
   else
     printf '  FAIL  no SmartThings CLI session\n'
-    command -v smartthings >/dev/null 2>&1 \
+    cli_bin >/dev/null 2>&1 \
       && printf '        run: smartthings locations\n' \
       || printf '        run: npm install -g @smartthings/cli && smartthings locations\n'
     return 1

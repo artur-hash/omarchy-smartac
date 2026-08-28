@@ -488,8 +488,9 @@ Panel {
                 + "One command does the whole setup — it asks before installing "
                 + "anything:\n\n"
                 + "    ~/.config/omarchy/plugins/io.github.artur-hash.smartac/scripts/setup.sh\n\n"
-                + "If the CLI is already installed, the shell cannot see it on its "
-                + "PATH: the terminal's PATH and the session's are not always the same."
+                + "The plugin looks for the CLI where npm, mise, nvm, volta and asdf "
+                + "put it, so PATH does not have to be right — but it does have to be "
+                + "installed somewhere."
           }
 
           Text {
