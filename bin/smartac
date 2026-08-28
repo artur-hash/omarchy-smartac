@@ -22,7 +22,13 @@ die()  { printf '{"error":%s}\n' "$(jq -Rn --arg m "$1" '$m')" >&2; exit "${2:-1
 # are all attacker-controlled in the threat model where the cloud endpoint is
 # not trusted, and none of them has a legitimate reason to be long.
 JQ_CLAMP='
-  def clampstr($n): if type == "string" then .[0:$n] else . end;
+  # Angle brackets are removed, not escaped. QML Text defaults to AutoText,
+  # which interprets markup -- including external resource references -- inside
+  # the long-lived shell process shared by every widget. Several surfaces that
+  # receive these strings are shell components this plugin cannot set
+  # textFormat on, so the safest place to make the text inert is here, before
+  # it leaves the only process that talks to the network.
+  def clampstr($n): if type == "string" then (.[0:$n] | gsub("[<>]"; "")) else . end;
   def clampstr: clampstr($MAXSTR);
   def clamplist: if type == "array" then [ .[0:$MAXLIST][] | clampstr ] else [] end;
 '

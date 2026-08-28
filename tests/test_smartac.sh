@@ -674,5 +674,26 @@ test_no_cli_anywhere_is_reported() {
 test_the_cli_is_found_off_PATH
 test_no_cli_anywhere_is_reported
 
+# QML Text defaults to AutoText, which interprets markup -- including external
+# resource references -- inside the long-lived shell process every widget
+# shares. Several surfaces that receive these strings are shell components this
+# plugin cannot set textFormat on, so the text is made inert here, in the only
+# process that talks to the network.
+test_markup_cannot_survive_a_device_label() {
+  setup
+  fake_cli_session
+  printf '{"items":[{"deviceId":"a","label":"<img src=x onerror=evil>Lamp","components":[{"capabilities":[{"id":"switch"},{"id":"airConditionerMode"}]}]}]}' > "$TMP/evil.json"
+  fake_curl 200 "$TMP/evil.json"
+  out=$("$ROOT/bin/smartac" devices --json 2>&1)
+  label=$(jq -r '.devices[0].label' <<<"$out")
+  grep -q '[<>]' <<<"$label" && bad "no angle bracket survives" "got [$label]" \
+    || ok "no angle bracket survives"
+  grep -q 'Lamp' <<<"$label" && ok "and the readable name is kept" \
+    || bad "and the readable name is kept" "got [$label]"
+  teardown
+}
+
+test_markup_cannot_survive_a_device_label
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

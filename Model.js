@@ -20,7 +20,16 @@ function emptyState() {
 }
 
 function _num(v) { return (typeof v === "number" && isFinite(v)) ? v : null }
-function _str(v) { return (typeof v === "string" && v !== "") ? v : null }
+// Angle brackets never survive into anything the panel renders. QML Text
+// defaults to AutoText, which interprets markup inside the shell process every
+// widget shares, and several surfaces that receive these strings are shell
+// components this plugin cannot set textFormat on. The backend strips them too;
+// this is the second place, because a string that reaches QML with a tag in it
+// is a bug wherever it came from.
+function plain(v) {
+  return String(v === null || v === undefined ? "" : v).replace(/[<>]/g, "")
+}
+function _str(v) { return (typeof v === "string" && v !== "") ? plain(v) : null }
 function _list(v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string" }) : [] }
 
 // The bounds the temperature buttons clamp to. Device first, unit-appropriate
@@ -140,5 +149,5 @@ function nextInterval(state, baseMs, consecutiveFailures, attended) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { parseStatus, barLabel, clampSetpoint, nextInterval, emptyState, setpointRange, heatIndex, feelsLike, MAX_INTERVAL_MS }
+  module.exports = { parseStatus, plain, barLabel, clampSetpoint, nextInterval, emptyState, setpointRange, heatIndex, feelsLike, MAX_INTERVAL_MS }
 }

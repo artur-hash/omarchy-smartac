@@ -195,7 +195,7 @@ Panel {
       if (exitCode !== 0) {
         var msg = ""
         try { msg = JSON.parse(String(actionErr.text || "")).error || "" } catch (e) {}
-        panel.actionError = msg !== "" ? msg : "Command failed."
+        panel.actionError = msg !== "" ? Model.plain(msg) : "Command failed."
         panel.pending = null
         panel.refreshAll()
         return
@@ -304,8 +304,10 @@ Panel {
     }
 
     panel.pending = null
-    panel.actionError = "The device did not apply " + want.label + " " + want.value
-      + ". It is still " + (got === "" || got === "null" ? "unchanged" : got)
+    // want.value and got both originate with the device; the message is a
+    // remote string wearing a sentence.
+    panel.actionError = "The device did not apply " + Model.plain(want.label) + " " + Model.plain(want.value)
+      + ". It is still " + (got === "" || got === "null" ? "unchanged" : Model.plain(got))
       + " — this unit ignores settings that do not apply to its current state."
   }
 
@@ -386,6 +388,7 @@ Panel {
           height: Math.max(titleText.implicitHeight, powerBox.height)
 
           Text {
+            textFormat: Text.PlainText
             id: titleText
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -418,6 +421,7 @@ Panel {
             opacity: !usable ? 0.45 : (powerBox.waiting ? 0.5 : 1.0)
 
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: "⏻"
               color: powerBox.on ? Style.selectedStateColor(panel.foreground, Color.accent)
@@ -598,6 +602,7 @@ Panel {
               spacing: Style.space(6)
 
               Text {
+                textFormat: Text.PlainText
                 text: heading
                 color: Qt.darker(panel.foreground, 1.6)
                 font.family: panel.fontFamily
@@ -666,12 +671,14 @@ Panel {
               width: parent.width
               spacing: Style.space(16)
               Text {
+                textFormat: Text.PlainText
                 text: panel.host.state.temperature === null
                   ? "—" : (panel.host.state.temperature + "°" + panel.host.state.unit)
                 color: panel.foreground
                 font.family: panel.fontFamily; font.pixelSize: Style.font.body; font.bold: true
               }
               Text {
+                textFormat: Text.PlainText
                 visible: panel.host.state.humidity !== null
                 anchors.verticalCenter: parent.verticalCenter
                 text: panel.host.state.humidity + "%"
@@ -679,6 +686,7 @@ Panel {
                 font.family: panel.fontFamily; font.pixelSize: Style.font.bodySmall
               }
               Text {
+                textFormat: Text.PlainText
                 // Only when it actually differs from the air temperature — see
                 // Model.feelsLike. Below ~27C the heat index equals it by definition.
                 visible: panel.feels !== null
@@ -702,6 +710,7 @@ Panel {
                 onClicked: panel.stepTemp(-1)
               }
               Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 text: panel.shownSetpoint === null
                   ? "—" : (panel.shownSetpoint + "°" + panel.host.state.unit)
