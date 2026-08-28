@@ -26,7 +26,9 @@ Panel {
   property Item anchorButton: null   // the visible bar button, set by BarWidget
   property color foreground: Color.foreground     // bound by the Loader in BarWidget.qml
   property string fontFamily: Style.font.family   // bound by the Loader in BarWidget.qml
-  property bool hasToken: false
+  property bool hasToken: false        // a usable SmartThings CLI session
+  property bool cliInstalled: false
+  property bool renewable: false
   property var devices: []
   property string busy: ""
   property string actionError: ""
@@ -151,12 +153,16 @@ Panel {
 
   Process {
     id: tokenCheck
-    command: [panel.bin, "token", "status", "--json"]
+    command: [panel.bin, "credential"]
     stdout: StdioCollector { id: tokenOut; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) { panel.hasToken = false; return }
-      try { panel.hasToken = JSON.parse(String(tokenOut.text)).hasToken === true }
-      catch (e) { panel.hasToken = false }
+      try {
+        var c = JSON.parse(String(tokenOut.text))
+        panel.hasToken = c.ready === true
+        panel.cliInstalled = c.cliInstalled === true
+        panel.renewable = c.renewable === true
+      } catch (e) { panel.hasToken = false; panel.cliInstalled = false; panel.renewable = false }
       if (panel.hasToken) deviceList.running = true
     }
   }
@@ -172,7 +178,7 @@ Panel {
       // true against a credential that no longer exists, showed an empty
       // picker instead of the setup screen, and left no way to enter a new
       // token short of restarting the shell.
-      if (exitCode === 3) { panel.hasToken = false; panel.actionError = "The token was rejected. Enter a new one."; return }
+      if (exitCode === 3) { panel.hasToken = false; panel.actionError = "The SmartThings CLI session was rejected. Run: smartthings locations"; return }
       if (exitCode !== 0) return
       try { panel.devices = JSON.parse(String(devOut.text)).devices || [] }
       catch (e) { panel.devices = [] }
@@ -305,61 +311,6 @@ Panel {
   // The token goes in on stdin. As an argument it would land in
   // /proc/<pid>/cmdline, readable by every process on this session — the same
   // reason the shell's own network panel pipes 802.1X secrets this way.
-  Process {
-    id: tokenSet
-    stderr: StdioCollector { id: tokenSetErr; waitForEnd: true }
-    property string pending: ""
-    command: [panel.bin, "token", "set"]
-    stdinEnabled: true
-    onStarted: {
-      write(tokenSet.pending)
-      tokenSet.pending = ""
-      // Closing stdin is required — the backend's `secret-tool store` reads
-      // until EOF and would otherwise hang. But this is an imperative write
-      // over a declared property, so it does not reset itself: saveToken has
-      // to turn it back on before every run, or the second token of the
-      // session reaches the backend with empty stdin and is rejected as
-      // "token is empty". That is the bug where a correct token pasted after
-      // a rejected one only worked again after a shell restart, because the
-      // restart rebuilt the Process with its declared value.
-      stdinEnabled = false
-    }
-    onExited: function(exitCode) {
-      // The only screen where the user types something and needs to be told
-      // it was refused. The backend rejects empty, whitespace-only and
-      // control-character tokens; without this those all looked like nothing
-      // happening at all.
-      if (exitCode !== 0) {
-        var msg = "Could not save the token."
-        try { msg = JSON.parse(String(tokenSetErr.text)).error || msg } catch (e) {}
-        panel.actionError = msg
-        return
-      }
-      panel.actionError = ""
-      panel.refreshAll()
-    }
-  }
-
-  function saveToken(value) {
-    // secret-tool strips only one trailing newline, and the backend now
-    // rejects anything else it does not recognize as a plain token — a
-    // clipboard paste routinely carries a trailing newline or pasted
-    // whitespace, so trim it here rather than bounce the user to the
-    // backend's refusal for something this harmless.
-    var trimmed = String(value || "").trim()
-    if (trimmed === "") return
-    tokenSet.pending = trimmed
-    tokenSet.stdinEnabled = true   // see onStarted: this does not reset itself
-    tokenSet.running = true
-    tokenField.text = ""
-  }
-
-  // KeyboardPanel, not PopupCard. PopupCard is a bare PopupWindow with no
-  // keyboard-focus handling at all, so the token TextField inside it could
-  // never take input — clicking it did nothing. KeyboardPanel is what every
-  // first-party panel with an input uses (see the wifi passphrase field in
-  // plugins/panels/network); it owns focus priming, anchored-to-icon
-  // positioning, outside-click dismissal and the fade.
   KeyboardPanel {
     id: popup
     anchorItem: panel.anchorButton
@@ -369,7 +320,7 @@ Panel {
     // Focus goes to the token field while there is no token, because that is
     // the only thing the user can do on that screen. Once configured, the key
     // catcher owns it for arrow-key navigation.
-    focusTarget: panel.hasToken ? keyCatcher : tokenField
+    focusTarget: keyCatcher
     contentWidth: popup.fittedContentWidth(Style.space(320))
     // The cap has to clear the expanded content, or More reveals cards below
     // the fold and reads as a button that does nothing. fittedContentHeight
@@ -492,6 +443,9 @@ Panel {
             fontFamily: panel.fontFamily
           }
 
+          // Nothing to paste: this plugin holds no credential of its own. It
+          // reads the session the SmartThings CLI keeps, the way other tools
+          // read gcloud's or gh's, and that session renews itself.
           Text {
             width: parent.width
             wrapMode: Text.WordWrap
@@ -499,30 +453,33 @@ Panel {
             color: Qt.darker(panel.foreground, 1.3)
             font.family: panel.fontFamily
             font.pixelSize: Style.font.bodySmall
-            text: "1.  Open account.smartthings.com/tokens\n" +
-                  "2.  Generate a new personal access token\n" +
-                  "3.  Grant only the Devices scopes: list, read, execute\n" +
-                  "4.  Paste it below. It is stored in your login keyring, never in a config file.\n\n" +
-                  "SmartThings expires a personal access token 24 hours after it is\n" +
-                  "created, so this needs doing again tomorrow. When it lapses the\n" +
-                  "panel returns to this screen."
+            text: panel.cliInstalled
+              ? "The SmartThings CLI is installed but not logged in. Run:\n\n"
+                + "    smartthings locations\n\n"
+                + "and log in when the browser opens."
+              : "This plugin reads the session the SmartThings CLI keeps, so there is "
+                + "nothing to paste and nothing that expires. Run:\n\n"
+                + "    npm install -g @smartthings/cli\n"
+                + "    smartthings locations\n\n"
+                + "and log in when the browser opens."
           }
 
-          TextField {
-            id: tokenField
+          Text {
             width: parent.width
-            password: true
-            placeholderText: "Personal access token"
-            foreground: panel.foreground
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: Qt.darker(panel.foreground, 1.7)
             font.family: panel.fontFamily
-            onAccepted: panel.saveToken(text)
+            font.pixelSize: Style.font.caption
+            text: "A personal access token would be quicker, and SmartThings expires one "
+                + "24 hours after it is created, so it is not offered here."
           }
 
           Button {
-            text: "Save"
+            text: "Check again"
             foreground: panel.foreground
             fontFamily: panel.fontFamily
-            onClicked: panel.saveToken(tokenField.text)
+            onClicked: panel.refreshAll()
           }
         }
 

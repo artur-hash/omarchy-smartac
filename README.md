@@ -29,7 +29,8 @@ plugin talks to SmartThings and needs the internet to do anything.
 ## Requirements
 
 - Omarchy 4 (Quattro)
-- `curl`, `jq`, and `secret-tool` with a running keyring daemon
+- `curl` and `jq` — present on a default install
+- Node, for the SmartThings CLI: `npm install -g @smartthings/cli`
 
 ## Install
 
@@ -39,45 +40,34 @@ omarchy plugin add https://github.com/artur-hash/omarchy-smartac.git --enable
 
 ## Setup
 
-Click the icon in the bar. With no token stored, the panel is the setup screen:
-
-1. Open [account.smartthings.com/tokens](https://account.smartthings.com/tokens)
-2. Generate a new personal access token
-3. Grant only the **Devices** scopes: list, read, execute
-4. Paste it into the panel
-
-Then pick your air conditioner from the list.
-
-**A personal access token lasts 24 hours.** SmartThings expires one a day
-after it is created — tokens issued before 30 December 2024 could last up to
-fifty years, but new ones cannot. So this is a daily chore, and that is a
-property of the credential rather than of this plugin. When the token lapses
-the panel says it was rejected and returns to the setup screen.
-
-The lasting fix is OAuth, where a refresh token buys a new access token
-without anyone retyping anything. It needs an API-only SmartApp registered in
-the SmartThings developer workspace, which is a larger piece of work than this
-plugin currently is; it is not here yet.
-
-## About the token
-
-A SmartThings personal access token grants control of **every device in your
-account**, not only the one you pick here. Grant only the Devices scopes: this
-plugin needs nothing else, and a token limited to those cannot reach your
-account settings, your locations, or your other users.
-
-The token is stored in your login keyring through `secret-tool`, never in a
-configuration file. It is written to the backend on stdin rather than passed as
-an argument, because an argument is visible in `/proc/<pid>/cmdline` to every
-process running as you.
-
-To remove it:
-
 ```bash
-~/.config/omarchy/plugins/io.github.artur-hash.smartac/bin/smartac token clear
+npm install -g @smartthings/cli
+smartthings locations
 ```
 
-Revoke it at [account.smartthings.com/tokens](https://account.smartthings.com/tokens).
+Log in when the browser opens, then pick your air conditioner in the panel.
+That is the whole setup: this plugin stores no credential of its own and never
+touches the keyring — it reads the session the CLI keeps, the way other tools
+read `gcloud`'s or `gh`'s, and that session renews itself.
+
+Install it **globally**, not through `npx`. The plugin only reads the stored
+session; the CLI only renews it when one of its own commands runs. Without
+`smartthings` on `PATH` the session works for a day and then dies, and
+`smartac doctor` says so rather than leaving you to guess.
+
+### Why there is no token to paste
+
+SmartThings expires a personal access token **24 hours after it is created**.
+Tokens issued before 30 December 2024 could last fifty years; new ones cannot.
+A bar widget that asks for a fresh credential every morning is not one anybody
+keeps, so that path was removed rather than kept as a fallback nobody should
+choose.
+
+The remaining route — registering an OAuth app — is closed to anyone whose home
+was set up by someone else and shared with them: authorising an app means
+installing it into a location you own, and a shared member owns none. Their
+devices read and control perfectly; only app authorisation is refused. The CLI
+sidesteps it because its own client installs with no location.
 
 ## When a setting does not take
 

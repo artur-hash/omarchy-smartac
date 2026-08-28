@@ -9,7 +9,12 @@ PASS=0; FAIL=0
 setup() {
   TMP=$(mktemp -d)
   export SECRET_STORE="$TMP/secret"
-  export PATH="$TMP/bin:$PATH"
+  # A minimal PATH, not the caller's: "smartthings is not on PATH" is a state
+  # these tests must be able to create, and inheriting the developer's makes it
+  # depend on what happens to be installed.
+  export PATH="$TMP/bin:/usr/bin:/bin"
+  export XDG_DATA_HOME="$TMP/share"
+  export XDG_CONFIG_HOME="$TMP/config"
   mkdir -p "$TMP/bin"
   # Mirrors real libsecret: reads all of stdin, then strips exactly one
   # trailing newline (not `cat > file`, which strips none and let an
@@ -32,6 +37,15 @@ FAKE
 }
 
 teardown() { rm -rf "$TMP"; }
+
+# The only credential this backend accepts: the session the SmartThings CLI
+# keeps. Nothing is stored by the plugin itself.
+fake_cli_session() {
+  mkdir -p "$XDG_DATA_HOME/@smartthings/cli"
+  jq -n --arg e "${1:-2099-01-01T00:00:00.000Z}" --arg t "${2:-cli-token-xyz}" \
+    '{"default:api.smartthings.com": {accessToken: $t, refreshToken: "r", expires: $e}}' \
+    > "$XDG_DATA_HOME/@smartthings/cli/credentials.json"
+}
 
 ok()    { PASS=$((PASS+1)); printf '  ok    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1)); printf '  FAIL  %s\n        %s\n' "$1" "$2"; }
@@ -75,31 +89,8 @@ FAKE
   chmod +x "$TMP/bin/curl"
 }
 
-test_token_set_reads_stdin() {
-  setup
-  printf 'tok-abc' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  check "token set stores what came on stdin" "$(cat "$SECRET_STORE")" "tok-abc"
-  teardown
-}
 
-test_token_never_in_argv() {
-  setup
-  # Refused outright, not quietly accepted: /proc/<pid>/cmdline exposes an
-  # argument to every process on the session for the length of the call.
-  out=$("$ROOT/bin/smartac" token set tok-in-argv 2>&1); rc=$?
-  check "token set rejects an argument" "$rc" "2"
-  [[ $out == *stdin* ]] && ok "the refusal names stdin" || bad "refusal message" "got [$out]"
-  teardown
-}
 
-test_token_status_and_clear() {
-  setup
-  printf 'tok-abc' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  check "status reports a token" "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "true"
-  "$ROOT/bin/smartac" token clear >/dev/null 2>&1
-  check "status reports none after clear" "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "false"
-  teardown
-}
 
 test_token_set_rejects_embedded_newline() {
   setup
@@ -114,34 +105,8 @@ test_token_set_rejects_embedded_newline() {
   teardown
 }
 
-test_token_set_rejects_other_control_characters() {
-  setup
-  out=$(printf 'tok-\x01-bad' | "$ROOT/bin/smartac" token set 2>&1); rc=$?
-  check "a token with a control character is rejected" "$rc" "2"
-  [[ $out == *error* ]] && ok "the refusal is a real error" || bad "refusal message" "got [$out]"
-  teardown
-}
 
-test_token_set_rejects_whitespace_only() {
-  setup
-  out=$(printf '   ' | "$ROOT/bin/smartac" token set 2>&1); rc=$?
-  check "a whitespace-only token is rejected" "$rc" "2"
-  [[ $out == *error* ]] && ok "the refusal is a real error" || bad "refusal message" "got [$out]"
-  [[ -f $SECRET_STORE ]] && bad "whitespace-only token was stored" "$(cat "$SECRET_STORE")" \
-    || ok "nothing was stored"
-  teardown
-}
 
-test_token_set_trailing_newline_is_still_accepted() {
-  setup
-  # A plain token with one ordinary trailing newline (the common shape of a
-  # pasted or echoed value) must still work — only embedded control
-  # characters and blank input are rejected.
-  printf 'tok-good\n' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  check "a token with a trailing newline is accepted" "$?" "0"
-  check "the stored token has the newline stripped" "$(cat "$SECRET_STORE")" "tok-good"
-  teardown
-}
 
 test_doctor_device_flag_missing_value() {
   setup
@@ -155,7 +120,7 @@ test_doctor_device_flag_missing_value() {
 
 test_devices_filters_by_capability() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   out=$("$ROOT/bin/smartac" devices --json)
   check "only the AC is listed"   "$(jq -r '.devices | length' <<<"$out")" "1"
@@ -166,36 +131,16 @@ test_devices_filters_by_capability() {
 
 test_devices_sends_bearer_token() {
   setup
-  printf 'tok-xyz' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   "$ROOT/bin/smartac" devices --json >/dev/null
-  grep -q "Bearer tok-xyz" "$TMP/curl.stdin" \
-    && ok "the request carries the bearer token via stdin" \
-    || bad "bearer token" "not in the recorded curl stdin"
+  grep -q "Bearer cli-token-xyz" "$TMP/curl.stdin" \
+    && ok "the request carries the session via stdin" \
+    || bad "session on stdin" "not in the recorded curl stdin"
   teardown
 }
 
-test_token_absent_from_argv() {
-  setup
-  printf 'tok-secret' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  fake_curl 200 "$ROOT/tests/fixtures/devices.json"
-  "$ROOT/bin/smartac" devices --json >/dev/null
-  grep -q "tok-secret" "$TMP/curl.args" \
-    && bad "token exposed" "found in curl arguments, but should be in stdin only" \
-    || ok "token is absent from curl arguments"
-  teardown
-}
 
-test_401_clears_the_token() {
-  setup
-  printf 'tok-bad' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
-  fake_curl 401 /dev/null
-  "$ROOT/bin/smartac" devices --json >/dev/null 2>&1; rc=$?
-  check "a 401 exits 3" "$rc" "3"
-  check "a 401 clears the stored token" \
-        "$("$ROOT/bin/smartac" token status --json | jq -r .hasToken)" "false"
-  teardown
-}
 
 test_no_token_is_its_own_exit_code() {
   setup
@@ -206,7 +151,7 @@ test_no_token_is_its_own_exit_code() {
 
 test_status_shape() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   echo '{"state":"ONLINE"}' >"$TMP/health.json"
   fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1)
@@ -220,7 +165,7 @@ test_status_shape() {
 
 test_status_online_comes_from_health() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   # health says ONLINE, status has no state field at top level.
   # This proves that online:true comes from /health, not /status.
   echo '{"state":"ONLINE"}' >"$TMP/health.json"
@@ -233,7 +178,7 @@ test_status_online_comes_from_health() {
 
 test_status_reports_an_offline_device() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   # health says OFFLINE, status is irrelevant
   echo '{"state":"OFFLINE"}' >"$TMP/health.json"
   fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
@@ -244,7 +189,7 @@ test_status_reports_an_offline_device() {
 
 test_status_missing_capability_is_null_not_absent() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   echo '{"state":"ONLINE"}' >"$TMP/health.json"
   echo '{"components":{"main":{"switch":{"switch":{"value":"off"}}}}}' >"$TMP/status.json"
   fake_curl_paths 200 "$TMP/health.json" "$TMP/status.json"
@@ -258,7 +203,7 @@ test_status_missing_capability_is_null_not_absent() {
 
 test_status_requires_device() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   "$ROOT/bin/smartac" status --json >/dev/null 2>&1
   check "status without --device exits 2" "$?" "2"
   teardown
@@ -266,7 +211,7 @@ test_status_requires_device() {
 
 test_status_preserves_401_exit_code_from_health() {
   setup
-  printf 'tok-bad' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   # A 401 from the health call should exit with code 3, not 1
   fake_curl 401 /dev/null
   "$ROOT/bin/smartac" status --json --device ac-1 >/dev/null 2>&1; rc=$?
@@ -276,7 +221,7 @@ test_status_preserves_401_exit_code_from_health() {
 
 test_status_guards_malformed_health() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   # Invalid JSON in health response should die with proper error
   echo 'not valid json' >"$TMP/health.json"
   fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status.json"
@@ -288,7 +233,7 @@ test_status_guards_malformed_health() {
 
 test_power_sends_the_switch_command() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   echo '{"results":[{"status":"ACCEPTED"}]}' >"$TMP/ok.json"
   fake_curl 200 "$TMP/ok.json"
   "$ROOT/bin/smartac" power on --device ac-1 >/dev/null
@@ -301,7 +246,7 @@ test_power_sends_the_switch_command() {
 
 test_temp_sends_a_numeric_setpoint() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   echo '{"results":[{"status":"ACCEPTED"}]}' >"$TMP/ok.json"
   fake_curl 200 "$TMP/ok.json"
   "$ROOT/bin/smartac" temp 22 --device ac-1 >/dev/null
@@ -317,7 +262,7 @@ test_temp_sends_a_numeric_setpoint() {
 
 test_temp_rejects_non_numeric() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   "$ROOT/bin/smartac" temp cold --device ac-1 >/dev/null 2>&1
   check "a non-numeric temperature exits 2" "$?" "2"
   teardown
@@ -325,7 +270,7 @@ test_temp_rejects_non_numeric() {
 
 test_power_rejects_other_words() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   "$ROOT/bin/smartac" power maybe --device ac-1 >/dev/null 2>&1
   check "power only accepts on/off" "$?" "2"
   teardown
@@ -333,7 +278,7 @@ test_power_rejects_other_words() {
 
 test_power_device_flag_missing_value() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   timeout 2 "$ROOT/bin/smartac" power on --device >/dev/null 2>&1
   check "power with bare --device exits 2, not hang" "$?" "2"
   teardown
@@ -341,7 +286,7 @@ test_power_device_flag_missing_value() {
 
 test_status_device_flag_missing_value() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   timeout 2 "$ROOT/bin/smartac" status --json --device >/dev/null 2>&1
   check "status with bare --device exits 2, not hang" "$?" "2"
   teardown
@@ -349,7 +294,7 @@ test_status_device_flag_missing_value() {
 
 test_parse_error_emits_exactly_one_json_object() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   err_output=$("$ROOT/bin/smartac" power on --device ac-1 --bogus 2>&1 >/dev/null)
   # Count the number of lines in stderr (one JSON object per line expected)
   line_count=$(printf '%s' "$err_output" | grep -c '^{.*}$')
@@ -359,20 +304,20 @@ test_parse_error_emits_exactly_one_json_object() {
 
 test_doctor_redacts_the_token() {
   setup
-  printf 'tok-verysecretvalue' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   out=$("$ROOT/bin/smartac" doctor 2>&1)
   # Asserts the secret's absence, not the prefix's presence: a redaction that
   # holds on the happy path and leaks on an error path passes the weaker one.
   grep -q "verysecretvalue" <<<"$out" \
     && bad "doctor leaks the token" "$out" || ok "doctor does not print the token"
-  grep -q "tok-" <<<"$out" && ok "doctor shows a redacted prefix" || bad "prefix" "$out"
+  grep -q "cli-" <<<"$out" && ok "doctor shows a redacted prefix" || bad "prefix" "$out"
   teardown
 }
 
 test_doctor_capabilities_lists_raw_ids() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   out=$("$ROOT/bin/smartac" doctor --capabilities --device ac-1)
   grep -q "thermostatCoolingSetpoint" <<<"$out" \
@@ -382,7 +327,7 @@ test_doctor_capabilities_lists_raw_ids() {
 
 test_doctor_capabilities_errors_on_unknown_device() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   out=$("$ROOT/bin/smartac" doctor --capabilities --device unknown-device 2>&1); rc=$?
   [[ $rc -ne 0 ]] && ok "unknown device exits non-zero" || bad "exit code" "got 0"
@@ -392,18 +337,10 @@ test_doctor_capabilities_errors_on_unknown_device() {
   teardown
 }
 
-test_token_set_reads_stdin
-test_token_never_in_argv
-test_token_status_and_clear
 test_token_set_rejects_embedded_newline
-test_token_set_rejects_other_control_characters
-test_token_set_rejects_whitespace_only
-test_token_set_trailing_newline_is_still_accepted
 test_doctor_device_flag_missing_value
 test_devices_filters_by_capability
 test_devices_sends_bearer_token
-test_token_absent_from_argv
-test_401_clears_the_token
 test_no_token_is_its_own_exit_code
 test_status_shape
 test_status_online_comes_from_health
@@ -430,7 +367,7 @@ test_doctor_capabilities_errors_on_unknown_device
 # without a code change.
 test_mode_sends_setAirConditionerMode() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null
   args=$(cat "$TMP/curl.args")
@@ -442,7 +379,7 @@ test_mode_sends_setAirConditionerMode() {
 
 test_mode_rejects_unsupported_value() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   out=$("$ROOT/bin/smartac" mode banana --device ac-1 2>&1); rc=$?
   check "an unsupported mode exits 2" "$rc" "2"
@@ -452,7 +389,7 @@ test_mode_rejects_unsupported_value() {
 
 test_fan_sends_setFanMode() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" fan turbo --device ac-1 >/dev/null
   args=$(cat "$TMP/curl.args")
@@ -463,7 +400,7 @@ test_fan_sends_setFanMode() {
 
 test_swing_sends_setFanOscillationMode() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" swing all --device ac-1 >/dev/null
   grep -q '"command":"setFanOscillationMode"' "$TMP/curl.args" && ok "swing command" || bad "swing command" "$(cat "$TMP/curl.args")"
@@ -472,7 +409,7 @@ test_swing_sends_setFanOscillationMode() {
 
 test_preset_sends_setAcOptionalMode() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" preset windFree --device ac-1 >/dev/null
   args=$(cat "$TMP/curl.args")
@@ -483,7 +420,7 @@ test_preset_sends_setAcOptionalMode() {
 
 test_status_carries_supported_lists_and_range() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   jq -s '.[0] * .[1]' "$ROOT/tests/fixtures/status-full.json" <(echo '{"state":"ONLINE"}') >"$TMP/both.json"
   fake_curl 200 "$TMP/both.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1)
@@ -504,7 +441,7 @@ test_status_carries_supported_lists_and_range() {
 # the cloud had already said it did not.
 test_refused_command_is_not_reported_as_success() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   printf '{"results":[{"id":"x","status":"FAILED"}]}' > "$TMP/refused.json"
   fake_curl 200 "$TMP/refused.json"
   out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
@@ -515,7 +452,7 @@ test_refused_command_is_not_reported_as_success() {
 
 test_completed_command_is_reported_as_success() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   printf '{"results":[{"id":"x","status":"COMPLETED"}]}' > "$TMP/done.json"
   fake_curl 200 "$TMP/done.json"
   out=$("$ROOT/bin/smartac" power on --device ac-1 2>&1); rc=$?
@@ -528,7 +465,7 @@ test_completed_command_is_reported_as_success() {
 # omit it, and inventing a failure is worse than trusting the 2xx.
 test_missing_results_array_is_still_success() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   printf '{}' > "$TMP/bare.json"
   fake_curl 200 "$TMP/bare.json"
   rc=0; "$ROOT/bin/smartac" power on --device ac-1 >/dev/null 2>&1 || rc=$?
@@ -542,7 +479,7 @@ test_missing_results_array_is_still_success() {
 # roughly sixteen requests in nine seconds.
 test_no_validate_skips_the_lookup_request() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" mode cool --device ac-1 --no-validate >/dev/null 2>&1
   gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
@@ -556,7 +493,7 @@ test_no_validate_skips_the_lookup_request() {
 # device accepts instead of a bare refusal.
 test_validation_still_runs_by_default() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   "$ROOT/bin/smartac" mode cool --device ac-1 >/dev/null 2>&1
   gets=$(grep -o 'GET' "$TMP/curl.args" | wc -l)
@@ -569,7 +506,7 @@ test_validation_still_runs_by_default() {
 # three seconds instead of eight.
 test_quick_status_skips_the_health_call() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/status-full.json"
   out=$("$ROOT/bin/smartac" status --json --quick --device ac-1 2>&1)
   health=$(grep -c '/health' "$TMP/curl.args" || true)
@@ -581,7 +518,7 @@ test_quick_status_skips_the_health_call() {
 
 test_full_status_still_checks_health() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   echo '{"state":"ONLINE"}' >"$TMP/health.json"
   fake_curl_paths 200 "$TMP/health.json" "$ROOT/tests/fixtures/status-full.json"
   out=$("$ROOT/bin/smartac" status --json --device ac-1 2>&1)
@@ -597,7 +534,7 @@ test_full_status_still_checks_health() {
 # than just this plugin.
 test_oversized_response_is_refused() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   # Two megabytes of valid JSON: over the one megabyte ceiling.
   { printf '{"pad":"'; head -c 2097152 /dev/zero | tr '\0' 'x'; printf '"}'; } > "$TMP/huge.json"
   fake_curl 200 "$TMP/huge.json"
@@ -609,7 +546,7 @@ test_oversized_response_is_refused() {
 
 test_response_at_the_ceiling_still_works() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   fake_curl 200 "$ROOT/tests/fixtures/devices.json"
   rc=0; "$ROOT/bin/smartac" devices --json >/dev/null 2>&1 || rc=$?
   check "an ordinary response is untouched" "$rc" "0"
@@ -621,7 +558,7 @@ test_response_at_the_ceiling_still_works() {
 # none of these has a legitimate reason to be long.
 test_remote_strings_are_truncated() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   long=$(head -c 5000 /dev/zero | tr '\0' 'L')
   jq -n --arg l "$long" '{items:[{deviceId:"ac-1", label:$l,
     components:[{id:"main", capabilities:[{id:"airConditionerMode"}]}]}]}' > "$TMP/longlabel.json"
@@ -636,7 +573,7 @@ test_remote_strings_are_truncated() {
 # cannot become ten thousand buttons.
 test_remote_lists_are_capped() {
   setup
-  printf 'tok' | "$ROOT/bin/smartac" token set >/dev/null 2>&1
+  fake_cli_session
   jq -n '{components:{main:{airConditionerMode:{
       airConditionerMode:{value:"cool"},
       supportedAcModes:{value:[range(5000) | tostring]}}}}}' > "$TMP/longlist.json"
@@ -665,6 +602,48 @@ test_oversized_response_is_refused
 test_response_at_the_ceiling_still_works
 test_remote_strings_are_truncated
 test_remote_lists_are_capped
+
+test_no_session_exits_2() {
+  setup
+  out=$("$ROOT/bin/smartac" devices --json 2>&1); rc=$?
+  check "no CLI session exits 2" "$rc" "2"
+  grep -q 'smartthings locations' <<<"$out" && ok "and says what to run" \
+    || bad "and says what to run" "$out"
+  teardown
+}
+
+test_the_session_never_reaches_argv() {
+  setup
+  fake_cli_session
+  printf '{"items":[]}' > "$TMP/e.json"
+  fake_curl 200 "$TMP/e.json"
+  "$ROOT/bin/smartac" devices --json >/dev/null 2>&1
+  grep -q 'cli-token-xyz' "$TMP/curl.args" && bad "the session is absent from argv" \
+    "$(cat "$TMP/curl.args")" || ok "the session is absent from argv"
+  grep -q 'cli-token-xyz' "$TMP/curl.stdin" && ok "and arrives on stdin" \
+    || bad "and arrives on stdin" "$(cat "$TMP/curl.stdin")"
+  teardown
+}
+
+# A rejected session is reported, never deleted: it belongs to the CLI, and
+# logging the user out of a tool this plugin merely reads is a side effect
+# nobody asked for.
+test_a_rejected_session_is_not_deleted() {
+  setup
+  fake_cli_session
+  printf '{}' > "$TMP/e.json"
+  fake_curl 401 "$TMP/e.json"
+  out=$("$ROOT/bin/smartac" devices --json 2>&1); rc=$?
+  check "a rejected session exits 3" "$rc" "3"
+  check "the credentials file is untouched" \
+    "$(jq -r '.["default:api.smartthings.com"].accessToken' "$XDG_DATA_HOME/@smartthings/cli/credentials.json")" \
+    "cli-token-xyz"
+  teardown
+}
+
+test_no_session_exits_2
+test_the_session_never_reaches_argv
+test_a_rejected_session_is_not_deleted
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

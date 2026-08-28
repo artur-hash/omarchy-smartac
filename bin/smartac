@@ -4,7 +4,6 @@
 set -uo pipefail
 
 API="https://api.smartthings.com/v1"
-SECRET_SERVICE="smartac"
 
 # Ceilings on anything the far end controls. A real status payload is a few
 # kilobytes and a real account has a handful of air conditioners, so these are
@@ -31,56 +30,80 @@ jq_shape() { jq --argjson MAXSTR "$MAX_STRING" --argjson MAXLIST "$MAX_LIST" "$@
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1" 4; }
 need jq
 
-# ------------------------------------------------------------------- token --
+# ------------------------------------------------------------- credential --
+#
+# One source: the session the SmartThings CLI holds. This plugin stores no
+# credential of its own and never touches the keyring.
+#
+# The alternative, a personal access token, was removed rather than kept as a
+# fallback. SmartThings expires one 24 hours after it is created, which makes a
+# bar widget ask for a new credential every morning -- and a fallback nobody
+# should choose is a second setup screen, a second failure mode and a second
+# thing to explain, bought for a path that does not work.
+#
+# Registering an OAuth app is the other route, and it is closed to a whole
+# class of user: authorising one means installing it into a location you own,
+# so anyone whose home was set up by someone else and shared with them cannot
+# complete it. The CLI's own client installs with no location and sidesteps it.
 
-read_token() {
-  local t
-  t=$(secret-tool lookup service "$SECRET_SERVICE" key token 2>/dev/null) || return 1
-  [[ -n $t ]] || return 1
-  printf '%s' "$t"
+cli_credentials_file() {
+  local f
+  for f in "${XDG_DATA_HOME:-$HOME/.local/share}/@smartthings/cli/credentials.json" \
+           "${XDG_CONFIG_HOME:-$HOME/.config}/@smartthings/cli/credentials.json"; do
+    [[ -r $f ]] && { printf '%s' "$f"; return 0; }
+  done
+  return 1
 }
 
-cmd_token() {
-  case "${1:-}" in
-    set)
-      # stdin only. An argument would land in /proc/<pid>/cmdline, which every
-      # process running as this user can read while the call is in flight.
-      [[ $# -eq 1 ]] || die "pass the token on stdin, not as an argument" 2
-      [[ -t 0 ]] && die "pass the token on stdin, not as an argument" 2
-      need secret-tool
-      local raw
-      raw=$(cat)
-      # Reject anything but a plain token. A control character — a bare
-      # newline above all — turns into a second record when this token is
-      # later written into curl's -K config format (see api(), below): the
-      # continuation line is parsed as a bogus option and echoed to curl's
-      # stderr, which is how a token fragment used to reach the journal.
-      # Whitespace-only input is rejected too: secret-tool would happily
-      # store it, and the panel would sit on the setup screen forever with
-      # nothing telling the user why.
-      [[ -n "${raw//[[:space:]]/}" ]] || die "token is empty" 2
-      [[ "$raw" =~ [[:cntrl:]] ]] && die "token contains control characters" 2
-      printf '%s' "$raw" | secret-tool store --label="SmartThings AC token" \
-        service "$SECRET_SERVICE" key token || die "could not write to the keyring" 5
-      printf '{"ok":true}\n' ;;
-    clear)
-      need secret-tool
-      secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
-      printf '{"ok":true}\n' ;;
-    status)
-      need secret-tool
-      if read_token >/dev/null 2>&1; then printf '{"hasToken":true}\n'
-      else printf '{"hasToken":false}\n'; fi ;;
-    *) die "usage: smartac token set|clear|status" 2 ;;
-  esac
+# The CLI refreshes an hour before expiry, so any command it runs inside that
+# window renews the session. Rather than rotate the pair here -- writing another
+# tool's credential file, and owning the failure where a spent refresh token is
+# never replaced -- we let it do its own job and simply ask.
+cli_refresh() {
+  command -v smartthings >/dev/null 2>&1 || return 1
+  smartthings locations --json >/dev/null 2>&1
 }
 
-# --------------------------------------------------------------------- api --
+TOKEN_VALUE=""
+resolve_token() {
+  local f entry exp exp_s now_s
+  f=$(cli_credentials_file) || return 1
+  entry=$(jq -c 'to_entries | map(select(.value.accessToken | type == "string")) | .[0] // empty' "$f" 2>/dev/null)
+  [[ -n $entry ]] || return 1
+
+  # Half an hour of margin: inside the CLI's own refresh window, so asking it
+  # actually renews rather than handing back the same nearly-dead token.
+  exp=$(jq -r '.value.expires // empty' <<<"$entry")
+  if [[ -n $exp ]]; then
+    exp_s=$(date -d "$exp" +%s 2>/dev/null) || exp_s=0
+    now_s=$(date +%s)
+    if (( exp_s > 0 && exp_s - now_s < 1800 )); then
+      cli_refresh
+      entry=$(jq -c 'to_entries | map(select(.value.accessToken | type == "string")) | .[0] // empty' "$f" 2>/dev/null)
+      [[ -n $entry ]] || return 1
+    fi
+  fi
+
+  TOKEN_VALUE=$(jq -r '.value.accessToken' <<<"$entry")
+  [[ -n $TOKEN_VALUE && $TOKEN_VALUE != null ]] || return 1
+}
+
+# The panel needs to tell three states apart: ready, the CLI is missing, and the
+# CLI is there but nobody has logged in. Each has a different next step.
+cmd_credential() {
+  local installed=false session=false renewable=false
+  command -v smartthings >/dev/null 2>&1 && installed=true
+  resolve_token 2>/dev/null && session=true
+  [[ $installed == true && $session == true ]] && renewable=true
+  printf '{"ready":%s,"cliInstalled":%s,"session":%s,"renewable":%s}\n' \
+    "$session" "$installed" "$session" "$renewable"
+}
 
 api() {
   need curl
   local method="$1" path="$2" body="${3:-}" token raw status out token_escaped
-  token=$(read_token) || die "no token stored" 2
+  resolve_token || die "no SmartThings CLI session; run: smartthings locations" 2
+  token="$TOKEN_VALUE"
 
   # Escape backslashes and double quotes in token for curl's config format.
   # SmartThings tokens are opaque strings unlikely to contain these characters,
@@ -137,8 +160,13 @@ api() {
 
   case "$status" in
     2*)  printf '%s' "$out" ;;
-    401) secret-tool clear service "$SECRET_SERVICE" key token 2>/dev/null
-         die "the token was rejected — SmartThings expires one 24 hours after it is created; generate another" 3 ;;
+    401) # One refresh, one retry, then stop rather than loop against a dead
+         # authorisation. Nothing is deleted: the session belongs to the CLI.
+         if [[ ${ST_RETRIED:-0} == 0 ]] && cli_refresh; then
+           ST_RETRIED=1 api "$method" "$path" "$body"
+           return $?
+         fi
+         die "the SmartThings CLI session was rejected; run: smartthings locations" 3 ;;
     429) die "rate limited by SmartThings" 7 ;;
     *)   die "SmartThings returned HTTP $status" 8 ;;
   esac
@@ -339,17 +367,31 @@ cmd_doctor() {
   fi
 
   printf 'SmartThings AC doctor\n\n'
-  for c in curl jq secret-tool; do
+  for c in curl jq; do
     command -v "$c" >/dev/null 2>&1 \
       && printf '  ok    %s\n' "$c" || printf '  FAIL  %s is missing\n' "$c"
   done
 
   local t
-  if t=$(read_token 2>/dev/null); then
-    # Four characters tells two tokens apart and is not enough to use one.
-    printf '  ok    token stored (%s...)\n' "${t:0:4}"
+  if resolve_token 2>/dev/null; then
+    t="$TOKEN_VALUE"
+    if command -v smartthings >/dev/null 2>&1; then
+      # Four characters tells two sessions apart and is not enough to use one.
+      printf '  ok    SmartThings CLI session (%s...) — renews itself\n' "${t:0:4}"
+    else
+      # Real, and unrenewable: the CLI refreshes only when one of its own
+      # commands runs, and there is none on PATH. Left unsaid, this looks
+      # healthy for a day and then fails with no hint why.
+      printf '  --    CLI session found (%s...) but "smartthings" is not on PATH\n' "${t:0:4}"
+      printf '        it cannot renew and will expire; install it globally:\n'
+      printf '        npm install -g @smartthings/cli\n'
+    fi
   else
-    printf '  FAIL  no token stored\n'; return 1
+    printf '  FAIL  no SmartThings CLI session\n'
+    command -v smartthings >/dev/null 2>&1 \
+      && printf '        run: smartthings locations\n' \
+      || printf '        run: npm install -g @smartthings/cli && smartthings locations\n'
+    return 1
   fi
 
   local devices_json
@@ -360,12 +402,12 @@ cmd_doctor() {
 }
 
 case "${1:-}" in
-  token)   shift; cmd_token "$@" ;;
+  credential) shift; cmd_credential "$@" ;;
   devices) cmd_devices ;;
   status)  shift; cmd_status "$@" ;;
   power)   shift; cmd_power "$@" ;;
   temp)    shift; cmd_temp "$@" ;;
   mode|fan|swing|preset) k="$1"; shift; cmd_enum "$k" "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
-  *) die "usage: smartac token|devices|status|power|temp|doctor" 2 ;;
+  *) die "usage: smartac credential|devices|status|power|temp|doctor" 2 ;;
 esac
